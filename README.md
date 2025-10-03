@@ -26,3 +26,6 @@ python -m venv .venv
 pip install -r requirements.txt
 
 uvicorn app.server:app --reload --port 8000
+
+CHECK AT 22H00 03102025 OK
+ACCEPT CLONE
