@@ -1,5 +1,6 @@
 from typing import List, Tuple, Optional
 import torch
+import random
 
 class GridWorldEnv:
     ACTIONS = [(0, -1), (1, 0), (0, 1), (-1, 0)]
@@ -18,10 +19,11 @@ class GridWorldEnv:
         self.state = self.start
         self.steps = 0
 
-        # Reward parameters
-        self.step_penalty = -1
+        # Reward parameters (tối ưu hơn)
+        self.step_penalty = -0.5
         self.wall_penalty = -2
         self.obstacle_penalty = -5
+        self.revisit_penalty = -1
         self.waypoint_reward = 20
         self.goal_reward = 50
         self.goal_before_waypoints_penalty = -5
@@ -33,9 +35,9 @@ class GridWorldEnv:
         if waypoints is not None: self.waypoints = waypoints
         self.visited_waypoints = set()
         self.state = self.start
+        self.steps = 0
         if max_steps is not None:
             self.max_steps = max_steps
-        self.steps = 0
         return self.state
 
     def step(self, action: int):
@@ -62,18 +64,25 @@ class GridWorldEnv:
             nx, ny = x, y
             reward = self.wall_penalty
             info["event"] = "wall"
+
         # Check obstacle
         elif (nx, ny) in self.obstacles:
             nx, ny = x, y
             reward = self.obstacle_penalty
             info["event"] = "obstacle"
+
         else:
             self.state = (nx, ny)
+
             # Check waypoint
             if self.state in self.waypoints and self.state not in self.visited_waypoints:
                 self.visited_waypoints.add(self.state)
                 reward += self.waypoint_reward
                 info["event"] = "waypoint"
+
+            # Phạt đi lại ô cũ
+            if self.state in self.visited_waypoints and self.state not in self.waypoints:
+                reward += self.revisit_penalty
 
         # Check goal
         if self.state == self.goal:
@@ -83,7 +92,7 @@ class GridWorldEnv:
                 info["event"] = "goal"
             else:
                 reward += self.goal_before_waypoints_penalty
-                done = False   # not done if waypoints chưa hết
+                done = False
                 info["event"] = "goal_before_waypoints"
 
         # Timeout
@@ -152,16 +161,27 @@ class GridWorldEnv:
         return grid
     
     def step_to(self, target):
-        """
-        Di chuyển trực tiếp robot tới ô target (x,y), cập nhật steps và visited_waypoints.
-        Không kiểm tra action hợp lệ như RL, dùng để chạy A*.
-        """
+        """Di chuyển trực tiếp robot tới ô target (A* dùng)."""
         self.state = target
         self.steps += 1
         if target in self.waypoints:
             self.visited_waypoints.add(target)
-        done = (target == self.goal)
+        done = (target == self.goal and set(self.waypoints).issubset(self.visited_waypoints))
         reward = 1 if target in self.waypoints else 0
         info = {"note": "Auto move by A*"}
         return target, reward, done, info
+    
+    def randomize_map(self, n_obstacles=5, n_waypoints=2):
+        """Ngẫu nhiên hóa vị trí obstacle, waypoint, goal."""
+        all_cells = [(x, y) for x in range(self.width) for y in range(self.height) if (x, y) != self.start]
+        random.shuffle(all_cells)
 
+        self.obstacles = set(all_cells[:n_obstacles])
+        remaining_cells = [cell for cell in all_cells if cell not in self.obstacles]
+
+        if len(remaining_cells) < n_waypoints + 1:
+            raise ValueError("Không đủ ô trống để chọn waypoint và goal.")
+
+        self.waypoints = remaining_cells[:n_waypoints]
+        self.goal = remaining_cells[n_waypoints]
+        self.reset()
