@@ -208,28 +208,28 @@ async function resetGrid(){
 }
 
 // ---------------- Reset All ----------------
-async function resetAllGrid(){
-    stopAll();
-    let resp = await fetch("/reset_all", {method:"POST"});
-    let data = await resp.json();
-    robotPos=data.state; goal=data.map.goal; obstacles=data.map.obstacles; waypoints=data.map.waypoints||[];
-    visitedWaypoints=[]; gridSizeX=data.map.width; gridSizeY=data.map.height;
-    drawGridOnce(); updateRobot([0,0], robotPos);
+// async function resetAllGrid(){
+//     stopAll();
+//     let resp = await fetch("/reset_all", {method:"POST"});
+//     let data = await resp.json();
+//     robotPos=data.state; goal=data.map.goal; obstacles=data.map.obstacles; waypoints=data.map.waypoints||[];
+//     visitedWaypoints=[]; gridSizeX=data.map.width; gridSizeY=data.map.height;
+//     drawGridOnce(); updateRobot([0,0], robotPos);
 
-    // Reset biểu đồ & stats
-    allAlgoData = {};
-    rewardChart.data.labels = [];
-    rewardChart.data.datasets = [];
-    rewardChart.update();
+//     // Reset biểu đồ & stats
+//     allAlgoData = {};
+//     rewardChart.data.labels = [];
+//     rewardChart.data.datasets = [];
+//     rewardChart.update();
 
-    clearTrajectory();
-    document.getElementById("msg").innerText="🌍 Gridworld đã được reset toàn bộ";
-    document.getElementById("current-algorithm").innerText="-";
-    document.getElementById("current-reward").innerText="-";
-    document.getElementById("current-steps").innerText="-";
-    document.getElementById("current-waypoints").innerText="-";
-    document.getElementById("current-time").innerText="-";
-}
+//     clearTrajectory();
+//     document.getElementById("msg").innerText="🌍 Gridworld đã được reset toàn bộ";
+//     document.getElementById("current-algorithm").innerText="-";
+//     document.getElementById("current-reward").innerText="-";
+//     document.getElementById("current-steps").innerText="-";
+//     document.getElementById("current-waypoints").innerText="-";
+//     document.getElementById("current-time").innerText="-";
+// }
 
 // ---------------- Run RL Algorithms step-by-step ----------------
 async function runAlgorithm(algo){
