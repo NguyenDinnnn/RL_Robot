@@ -188,3 +188,4 @@ with open(MC_QFILE, 'wb') as f:
     pickle.dump(dict(mc_Q), f)
 
 print(f"Huấn luyện hoàn tất. Q-table được lưu tại: {MC_QFILE}")
+
