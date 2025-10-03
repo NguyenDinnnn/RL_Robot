@@ -39,7 +39,9 @@ env.goal_before_waypoints_penalty = -10.0
 # ---------------------------
 # Models dir
 # ---------------------------
-models_dir = os.path.join(os.path.dirname(__file__), "../clients/models")
+current_dir = os.path.dirname(__file__)
+parent_dir = os.path.dirname(current_dir)
+models_dir = os.path.join(parent_dir, "clients", "models")
 os.makedirs(models_dir, exist_ok=True)
 
 # ---------------------------
@@ -78,8 +80,11 @@ if os.path.exists(sarsa_qfile):
         loaded_sarsa_Q = pickle.load(f)
     sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
     sarsa_Q.update(loaded_sarsa_Q)
+    
+    print(f"✅ Đã tải Q-table SARSA, tổng số state đã biết = {len(sarsa_Q)}")
 else:
     sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
+    print("🆕 Không tìm thấy Q-table SARSA, tạo mới.")
 
 # ---------------------------
 # Load A2C
@@ -447,33 +452,26 @@ def step_algorithm(req: AlgorithmRequest):
             reward = r
 
         elif algo == "SARSA":
-            if np.random.rand() < epsilon:
-                action_name = np.random.choice(actions)
+            # 1. Dùng đúng định dạng state (3 thành phần) đã được huấn luyện.
+            visited_code = encode_visited(env.waypoints, env.visited_waypoints)
+            sarsa_state = (state_xy[0], state_xy[1], visited_code)
+
+            # 2. Chuyển sang chế độ khai thác (exploitation), không huấn luyện online.
+            # Luôn chọn hành động tốt nhất (greedy) từ Q-table đã học.
+            if sarsa_state in sarsa_Q and any(sarsa_Q[sarsa_state].values()):
+                max_q = max(sarsa_Q[sarsa_state].values())
+                best_actions = [a for a, q in sarsa_Q[sarsa_state].items() if q == max_q]
+                action_name = random.choice(best_actions)
             else:
-                if full_state in sarsa_Q and any(sarsa_Q[full_state].values()):
-                    action_name = max(sarsa_Q[full_state], key=sarsa_Q[full_state].get)
-                else:
-                    action_name = np.random.choice(actions)
-
+                # Nếu không biết trạng thái này, hành động ngẫu nhiên.
+                action_name = np.random.choice(actions)
+            
             action_idx = actions.index(action_name)
-
             next_state, r, done, _ = env.step(action_idx)
 
-            next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            next_state_tuple = (next_state[0], next_state[1], next_visited_code)
-
-            if next_state_tuple in sarsa_Q and any(sarsa_Q[next_state_tuple].values()):
-                next_action_name = max(sarsa_Q[next_state_tuple], key=sarsa_Q[next_state_tuple].get)
-            else:
-                next_action_name = np.random.choice(actions)
-
-            sarsa_Q[full_state][action_name] += alpha * (
-                r + gamma * sarsa_Q[next_state_tuple][next_action_name] - sarsa_Q[full_state][action_name]
-            )
-
+            # Cập nhật các biến trả về
             state_xy = next_state
             reward = r
-            epsilon = max(0.1, epsilon * 0.995)
 
         elif algo == "A2C":
             state_tensor = env.build_grid_state().unsqueeze(0)
