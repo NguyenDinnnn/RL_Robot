@@ -1,4 +1,5 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
+from fastapi.staticfiles import StaticFiles
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Tuple, Optional
@@ -24,16 +25,18 @@ app.mount("/web", StaticFiles(directory=os.path.join(os.path.dirname(__file__), 
 # Environment
 # ---------------------------
 width, height = 10, 8
-start = (0,0)
-goal = (9,7)
-waypoints = [(3,2),(6,5)]
-obstacles = [(1,1),(2,3),(4,4),(5,1),(7,6)]
+start = (0, 0)
+goal = (9, 7)
+waypoints = [(3, 2), (6, 5)]
+obstacles = [(1, 1), (2, 3), (4, 4), (5, 1), (7, 6)]
 env = GridWorldEnv(width, height, start, goal, obstacles, waypoints, max_steps=100)
-env.step_penalty = -2.0
-env.revisit_penalty = -3.0
-env.waypoint_reward = 30.0
-env.goal_reward = 100.0
-env.goal_before_waypoints_penalty = -10.0
+env.step_penalty = -0.5  # Sync with train_a2c.py
+env.wall_penalty = -2.0
+env.obstacle_penalty = -5.0
+env.revisit_penalty = -1.0
+env.waypoint_reward = 20.0
+env.goal_reward = 50.0
+env.goal_before_waypoints_penalty = -5.0
 
 # ---------------------------
 # Models dir
@@ -58,14 +61,13 @@ else:
 # ---------------------------
 QL_QFILE_OFFLINE = os.path.join(models_dir, "qlearning_qtable_offline.pkl")
 ql_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
-
 if os.path.exists(QL_QFILE_OFFLINE):
     with open(QL_QFILE_OFFLINE, "rb") as f:
         loaded_ql_Q = pickle.load(f)
     ql_Q.update(loaded_ql_Q)
     print(f"✅ Đã tải Q-table Q-Learning từ file OFFLINE: {QL_QFILE_OFFLINE}")
 else:
-    print(f"⚠️ KHÔNG tìm thấy file Q-table OFFLINE: {QL_QFILE_OFFLINE}. Bắt đầu với Q-table rỗng.")
+    print(f"⚠️ File Q-table Q-Learning {QL_QFILE_OFFLINE} không tồn tại. Hãy huấn luyện trước.")
 
 # ---------------------------
 # Load SARSA
@@ -76,8 +78,11 @@ if os.path.exists(sarsa_qfile):
         loaded_sarsa_Q = pickle.load(f)
     sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
     sarsa_Q.update(loaded_sarsa_Q)
+    
+    print(f"✅ Đã tải Q-table SARSA, tổng số state đã biết = {len(sarsa_Q)}")
 else:
     sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
+    print("🆕 Không tìm thấy Q-table SARSA, tạo mới.")
 
 # ---------------------------
 # Load A2C
@@ -87,13 +92,17 @@ in_channels = 5
 height, width = env.height, env.width
 n_actions = len(env.ACTIONS)
 a2c_model = ActorCritic(in_channels, height, width, n_actions)
+a2c_model_loaded = False
 if os.path.exists(a2c_model_file):
     try:
         a2c_model.load_state_dict(torch.load(a2c_model_file))
         a2c_model.eval()
+        a2c_model_loaded = True
         print("✅ A2C model loaded successfully")
-    except RuntimeError:
-        print("⚠️ Không load được A2C checkpoint. Sẽ dùng model mới.")
+    except RuntimeError as e:
+        print(f"⚠️ Không load được A2C checkpoint: {str(e)}. Sẽ dùng model mới.")
+else:
+    print(f"⚠️ File A2C model {a2c_model_file} không tồn tại. Hãy huấn luyện trước bằng train_a2c.py.")
 
 # ---------------------------
 # RL params
@@ -103,28 +112,27 @@ alpha, gamma = 0.1, 0.99
 epsilon = 1.0
 epsilon_min = 0.01
 epsilon_decay = 0.995
-
 # ---------------------------
 # Request Models
 # ---------------------------
 class ResetRequest(BaseModel):
-    width: Optional[int]=None
-    height: Optional[int]=None
-    start: Optional[Tuple[int,int]]=None
-    goal: Optional[Tuple[int,int]]=None
-    waypoints: Optional[List[Tuple[int,int]]]=None
-    obstacles: Optional[List[Tuple[int,int]]]=None
-    max_steps: Optional[int]=None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    start: Optional[Tuple[int, int]] = None
+    goal: Optional[Tuple[int, int]] = None
+    waypoints: Optional[List[Tuple[int, int]]] = None
+    obstacles: Optional[List[Tuple[int, int]]] = None
+    max_steps: Optional[int] = None
 
 class ActionInput(BaseModel):
-    action: Optional[int]=None
-    action_name: Optional[str]=None
+    action: Optional[int] = None
+    action_name: Optional[str] = None
 
 class AlgorithmRequest(BaseModel):
     algorithm: str
 
 class AStarRequest(BaseModel):
-    goal: Optional[Tuple[int,int]] = None
+    goal: Optional[Tuple[int, int]] = None
 
 def encode_visited(wp_list, visited_set):
     code = 0
@@ -136,12 +144,20 @@ def encode_visited(wp_list, visited_set):
 def manhattan_distance(pos1: Tuple[int, int], pos2: Tuple[int, int]) -> int:
     return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
 
+# Hàm chọn target waypoint chưa thăm gần nhất (thêm vào server)
+def select_next_target(env):
+    unvisited_waypoints = set(env.waypoints) - env.visited_waypoints
+    if unvisited_waypoints:
+        return min(unvisited_waypoints, key=lambda wp: manhattan_distance(env.get_state(), wp))
+    else:
+        return env.goal
+    
 # ---------------------------
 # A* functions
 # ---------------------------
 def a_star(start, goal, obstacles, width, height):
     open_set = []
-    heapq.heappush(open_set, (0+manhattan_distance(start, goal), 0, start, [start]))
+    heapq.heappush(open_set, (0 + abs(start[0] - goal[0]) + abs(start[1] - goal[1]), 0, start, [start]))
     visited = set()
     while open_set:
         f, g, current, path = heapq.heappop(open_set)
@@ -151,10 +167,10 @@ def a_star(start, goal, obstacles, width, height):
             continue
         visited.add(current)
         x, y = current
-        for dx, dy in [(0,-1),(1,0),(0,1),(-1,0)]:
-            nx, ny = x+dx, y+dy
-            if 0<=nx<width and 0<=ny<height and (nx,ny) not in obstacles:
-                heapq.heappush(open_set, (g+1+manhattan_distance((nx,ny), goal), g+1, (nx,ny), path+[(nx,ny)]))
+        for dx, dy in [(0, -1), (1, 0), (0, 1), (-1, 0)]:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < width and 0 <= ny < height and (nx, ny) not in obstacles:
+                heapq.heappush(open_set, (g + 1 + abs(nx - goal[0]) + abs(ny - goal[1]), g + 1, (nx, ny), path + [(nx, ny)]))
     return []
 
 def plan_path_through_waypoints(start, waypoints, goal, obstacles, width, height):
@@ -189,7 +205,7 @@ def step_to_rl(self, target):
     prev_state = self.state
     self.state = target
     self.steps += 1
-    reward = self.step_penalty
+    reward = -0.1  # Đồng bộ với A* reward trong server
     done = False
     info = {"note": "Auto move by A* (RL reward)"}
     if target in self.waypoints and target not in self.visited_waypoints:
@@ -235,11 +251,13 @@ def reset(req: ResetRequest):
         ob = req.obstacles if req.obstacles is not None else list(env.obstacles)
         ms = req.max_steps if req.max_steps is not None else 100
         env = GridWorldEnv(w, h, s, g, ob, wp, max_steps=ms)
-        env.step_penalty = -2.0
-        env.revisit_penalty = -3.0
-        env.waypoint_reward = 30.0
-        env.goal_reward = 100.0
-        env.goal_before_waypoints_penalty = -10.0
+        env.step_penalty = -0.5
+        env.wall_penalty = -2.0
+        env.obstacle_penalty = -5.0
+        env.revisit_penalty = -1.0
+        env.waypoint_reward = 20.0
+        env.goal_reward = 50.0
+        env.goal_before_waypoints_penalty = -5.0
         state = env.reset(max_steps=ms)
         return {"state": state, "map": env.get_map(), "ascii": env.render_ascii()}
 
@@ -256,11 +274,13 @@ def reset_all():
         waypoints = remain[:2]
         goal = remain[2]
         env = GridWorldEnv(w, h, start, goal, obstacles, waypoints, max_steps=100)
-        env.step_penalty = -2.0
-        env.revisit_penalty = -3.0
-        env.waypoint_reward = 30.0
-        env.goal_reward = 100.0
-        env.goal_before_waypoints_penalty = -10.0
+        env.step_penalty = -0.5
+        env.wall_penalty = -2.0
+        env.obstacle_penalty = -5.0
+        env.revisit_penalty = -1.0
+        env.waypoint_reward = 20.0
+        env.goal_reward = 50.0
+        env.goal_before_waypoints_penalty = -5.0
         state = env.reset(max_steps=100)
         return {
             "state": state,
@@ -287,9 +307,9 @@ def step(inp: ActionInput):
     with _env_lock:
         try:
             if inp.action_name is not None:
-                s,r,done,info = env.step_by_name(inp.action_name)
+                s, r, done, info = env.step_by_name(inp.action_name)
             elif inp.action is not None:
-                s,r,done,info = env.step(inp.action)
+                s, r, done, info = env.step(inp.action)
             else:
                 return {"error": "No action provided"}
             return {
@@ -330,15 +350,7 @@ def run_qlearning_greedy():
                 best_actions = [a for a, q in ql_Q[full_state].items() if q == max_q]
                 action_name = random.choice(best_actions)
             else:
-                # Fallback to A* if state not in Q-table
-                path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
-                if len(path_to_target) > 1:
-                    next_pos = path_to_target[1]
-                    dx, dy = next_pos[0] - state_xy[0], next_pos[1] - state_xy[1]
-                    action_idx = env.ACTIONS.index((dx, dy))
-                    action_name = actions[action_idx]
-                else:
-                    action_name = random.choice(actions)
+                action_name = random.choice(actions)  # Fallback nếu không có Q-value
             action_idx = actions.index(action_name)
             next_state_xy, reward, done_env, _ = env.step(action_idx)
             if next_state_xy == target:
@@ -369,6 +381,7 @@ def run_qlearning_greedy():
 @app.post("/run_mc_greedy")
 def run_mc_greedy():
     global mc_Q
+
     with _env_lock:
         start_time = time.time()
         start_xy = env.reset()
@@ -427,21 +440,26 @@ def run_mc_greedy():
             "elapsed_time": elapsed_time,
             "rewards_over_time": rewards_over_time
         }
-
+    
 @app.post("/step_algorithm")
 def step_algorithm(req: AlgorithmRequest):
-    global epsilon, mc_Q
+    global epsilon, trajectory, mc_Q
     algo = req.algorithm
     with _env_lock:
+        # ensure trajectory exists (used by MC)
+        if 'trajectory' not in globals() or trajectory is None:
+            trajectory = []
+
         state_xy = env.get_state()
         done = False
         reward = 0
-        trajectory = []  # Lưu trajectory cho MC
         visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-        dist_to_next = min([manhattan_distance(state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
+        dist_to_next = min([manhattan_distance(state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] +
                            [manhattan_distance(state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
         full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
+
         if algo == "MC":
+            # use global epsilon (declared above)
             if np.random.rand() > epsilon:
                 if full_state in mc_Q and any(mc_Q[full_state].values()):
                     action_name = max(mc_Q[full_state], key=mc_Q[full_state].get)
@@ -458,8 +476,50 @@ def step_algorithm(req: AlgorithmRequest):
                         action_name = np.random.choice(actions)
             else:
                 action_name = np.random.choice(actions)
+
             action_idx = actions.index(action_name)
             next_state, r, done, _ = env.step(action_idx)
+
+            next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
+            next_dist_to_next = min([manhattan_distance(next_state, wp) for wp in env.waypoints if wp not in env.visited_waypoints] +
+                                    [manhattan_distance(next_state, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
+            next_state_tuple = (next_state[0], next_state[1], next_visited_code, next_dist_to_next)
+
+            # append to trajectory (for every step in MC)
+            trajectory.append((full_state, action_name, r))
+
+            reward = r
+            state_xy = next_state
+
+            if done or env.steps >= env.max_steps:
+                # First-visit MC update
+                G = 0
+                visited_state_actions = set()
+                for state, action, r in reversed(trajectory):
+                    G = r + gamma * G
+                    state_action = (state, action)
+                    if state_action not in visited_state_actions:
+                        visited_state_actions.add(state_action)
+                        old_q = mc_Q[state][action]
+                        mc_Q[state][action] += alpha * (G - old_q)
+                trajectory = []
+
+            # update epsilon after the episode-step (still global)
+            epsilon = max(epsilon_min, epsilon * epsilon_decay)
+
+        elif algo == "Q-learning":
+            # Chạy Greedy trên Q-table đã tải (Không online training)
+            if full_state in ql_Q and any(ql_Q[full_state].values()):
+                action_name = max(ql_Q[full_state], key=ql_Q[full_state].get)
+            else:
+                # fallback to small exploration if Q not known
+                action_name = np.random.choice(actions)
+
+            action_idx = actions.index(action_name)
+
+            next_state, r, done, _ = env.step(action_idx)
+
+            # Cập nhật trạng thái
             next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
             next_dist_to_next = min([manhattan_distance(next_state, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
                                     [manhattan_distance(next_state, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
@@ -487,39 +547,71 @@ def step_algorithm(req: AlgorithmRequest):
             action_idx = actions.index(action_name)
             next_state, r, done, _ = env.step(action_idx)
             state_xy = next_state
-            reward = r
+
         elif algo == "SARSA":
-            if np.random.rand() < epsilon:
-                action_name = np.random.choice(actions)
+            # 1. Dùng đúng định dạng state (3 thành phần) đã được huấn luyện.
+            visited_code = encode_visited(env.waypoints, env.visited_waypoints)
+            sarsa_state = (state_xy[0], state_xy[1], visited_code)
+
+            # 2. Chuyển sang chế độ khai thác (exploitation), không huấn luyện online.
+            # Luôn chọn hành động tốt nhất (greedy) từ Q-table đã học.
+            if sarsa_state in sarsa_Q and any(sarsa_Q[sarsa_state].values()):
+                max_q = max(sarsa_Q[sarsa_state].values())
+                best_actions = [a for a, q in sarsa_Q[sarsa_state].items() if q == max_q]
+                action_name = random.choice(best_actions)
             else:
-                if full_state in sarsa_Q and any(sarsa_Q[full_state].values()):
-                    action_name = max(sarsa_Q[full_state], key=sarsa_Q[full_state].get)
-                else:
-                    action_name = np.random.choice(actions)
+                # Nếu không biết trạng thái này, hành động ngẫu nhiên.
+                action_name = np.random.choice(actions)
+            
             action_idx = actions.index(action_name)
             next_state, r, done, _ = env.step(action_idx)
-            next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            next_state_tuple = (next_state[0], next_state[1], next_visited_code)
-            if next_state_tuple in sarsa_Q and any(sarsa_Q[next_state_tuple].values()):
-                next_action_name = max(sarsa_Q[next_state_tuple], key=sarsa_Q[next_state_tuple].get)
-            else:
-                next_action_name = np.random.choice(actions)
-            sarsa_Q[full_state][action_name] += alpha * (
-                r + gamma * sarsa_Q[next_state_tuple][next_action_name] - sarsa_Q[full_state][action_name]
-            )
+
+            # Cập nhật các biến trả về
             state_xy = next_state
             reward = r
-            epsilon = max(epsilon_min, epsilon * 0.995)
+
         elif algo == "A2C":
+            if not a2c_model_loaded:
+                raise HTTPException(status_code=400, detail="A2C model not loaded. Please train or load a valid model.")
+
+            # Waypoint scheduling: chọn target chưa thăm gần nhất
+            target = select_next_target(env)
+
             state_tensor = env.build_grid_state().unsqueeze(0)
             a2c_model.eval()
             with torch.no_grad():
                 policy_logits, _ = a2c_model(state_tensor)
                 action_probs = F.softmax(policy_logits, dim=-1).squeeze(0)
-                action_idx = torch.multinomial(action_probs, 1).item()
+                action_probs = action_probs + 1e-10
+                # Epsilon-greedy action selection
+                if random.random() < epsilon:
+                    action_idx = random.choice(range(n_actions))
+                else:
+                    action_idx = torch.multinomial(action_probs, 1).item()
+
+            print(f"A2C action_probs: {action_probs.tolist()}, chosen action: {action_idx}, state: {state_xy}")
             next_state, r, done, _ = env.step(action_idx)
-            state_xy = next_state
+
+            # Enhanced A* fallback: trigger if no progress toward target or bad reward
+            current_dist = manhattan_distance(state_xy, target)
+            next_dist = manhattan_distance(next_state, target)
+            if r <= env.obstacle_penalty or r == env.wall_penalty or (next_dist >= current_dist and r == env.step_penalty):
+                path_to_target = a_star(env.get_state(), target, env.obstacles, env.width, env.height)
+                if len(path_to_target) > 1:
+                    next_pos = path_to_target[1]
+                    dx, dy = next_pos[0] - env.get_state()[0], next_pos[1] - env.get_state()[1]
+                    try:
+                        action_idx = env.ACTIONS.index((dx, dy))
+                        next_state, r, done, _ = env.step(action_idx)
+                        print(f"A* fallback triggered: new action: {action_idx}, new state: {next_state}, reward: {r}")
+                    except ValueError:
+                        print(f"A* fallback failed: invalid action from {state_xy} to {next_pos}")
+
             reward = r
+            state_xy = next_state
+            epsilon = max(epsilon_min, epsilon * epsilon_decay)
+            print(f"A2C step: state: {state_xy}, reward: {r}, done: {done}, steps: {env.steps}, visited: {env.visited_waypoints}")
+            
         return {
             "state": state_xy,
             "reward": reward,
@@ -534,8 +626,7 @@ def run_a_star(req: AStarRequest):
         start_time = time.time()
         rewards_over_time = []
         start = env.get_state()
-        path = plan_path_through_waypoints(start, env.waypoints, req.goal or env.goal,
-                                         env.obstacles, env.width, env.height)
+        path = plan_path_through_waypoints(start, env.waypoints, req.goal or env.goal, env.obstacles, env.width, env.height)
         if not path:
             return {"error": "Không tìm thấy đường đi qua tất cả waypoint"}
         env.reset()
@@ -580,6 +671,8 @@ def save_sarsa():
 
 @app.post("/save_a2c")
 def save_a2c():
+    if not a2c_model_loaded:
+        raise HTTPException(status_code=400, detail="A2C model not loaded or trained. Cannot save.")
     torch.save(a2c_model.state_dict(), os.path.join(models_dir, 'a2c_model.pth'))
     return {"status": "A2C model saved"}
 
