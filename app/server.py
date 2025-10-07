@@ -446,7 +446,6 @@ def step_algorithm(req: AlgorithmRequest):
     global epsilon, trajectory, mc_Q
     algo = req.algorithm
     with _env_lock:
-        # Ensure trajectory exists (used by MC)
         if 'trajectory' not in globals() or trajectory is None:
             trajectory = []
 
