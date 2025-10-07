@@ -446,7 +446,7 @@ def step_algorithm(req: AlgorithmRequest):
     global epsilon, trajectory, mc_Q
     algo = req.algorithm
     with _env_lock:
-        # ensure trajectory exists (used by MC)
+        # Ensure trajectory exists (used by MC)
         if 'trajectory' not in globals() or trajectory is None:
             trajectory = []
 
@@ -539,14 +539,6 @@ def step_algorithm(req: AlgorithmRequest):
                         mc_Q[state][action] += alpha * (G - old_q)
                 trajectory = []
             epsilon = max(epsilon_min, epsilon * epsilon_decay)
-        elif algo == "Q-learning":
-            if full_state in ql_Q and any(ql_Q[full_state].values()):
-                action_name = max(ql_Q[full_state], key=ql_Q[full_state].get)
-            else:
-                action_name = np.random.choice(actions)
-            action_idx = actions.index(action_name)
-            next_state, r, done, _ = env.step(action_idx)
-            state_xy = next_state
 
         elif algo == "SARSA":
             # 1. Dùng đúng định dạng state (3 thành phần) đã được huấn luyện.
@@ -581,15 +573,29 @@ def step_algorithm(req: AlgorithmRequest):
             a2c_model.eval()
             with torch.no_grad():
                 policy_logits, _ = a2c_model(state_tensor)
-                action_probs = F.softmax(policy_logits, dim=-1).squeeze(0)
-                action_probs = action_probs + 1e-10
-                # Epsilon-greedy action selection
-                if random.random() < epsilon:
+                # Check for inf/nan in logits
+                if torch.isnan(policy_logits).any() or torch.isinf(policy_logits).any():
+                    print(f"Warning: policy_logits contains nan/inf: {policy_logits.tolist()}")
+                    # Fallback to random action if logits are invalid
                     action_idx = random.choice(range(n_actions))
                 else:
-                    action_idx = torch.multinomial(action_probs, 1).item()
+                    action_probs = F.softmax(policy_logits, dim=-1).squeeze(0)
+                    # Check for inf/nan in probabilities
+                    if torch.isnan(action_probs).any() or torch.isinf(action_probs).any() or (action_probs < 0).any():
+                        print(f"Warning: action_probs contains invalid values: {action_probs.tolist()}")
+                        action_idx = random.choice(range(n_actions))
+                    else:
+                        # Epsilon-greedy action selection
+                        if random.random() < epsilon:
+                            action_idx = random.choice(range(n_actions))
+                        else:
+                            try:
+                                action_idx = torch.multinomial(action_probs, 1).item()
+                            except RuntimeError as e:
+                                print(f"Error in multinomial: {str(e)}, action_probs: {action_probs.tolist()}")
+                                action_idx = random.choice(range(n_actions))
 
-            print(f"A2C action_probs: {action_probs.tolist()}, chosen action: {action_idx}, state: {state_xy}")
+            print(f"A2C action_probs: {action_probs.tolist() if 'action_probs' in locals() else 'invalid'}, chosen action: {action_idx}, state: {state_xy}, target: {target}")
             next_state, r, done, _ = env.step(action_idx)
 
             # Enhanced A* fallback: trigger if no progress toward target or bad reward
