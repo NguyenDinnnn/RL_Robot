@@ -1,22 +1,23 @@
+import os
+import pickle
+from collections import defaultdict
+import random
 import numpy as np
-<<<<<<< Updated upstream
-=======
 from typing import List, Tuple, Optional
->>>>>>> Stashed changes
+# import heapq # Không cần A*
+# from itertools import permutations # Không cần A*
 import sys, os
 sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
 from app.robot_env import GridWorldEnv
-import random
-import pickle
 
-<<<<<<< Updated upstream
-env = GridWorldEnv()
-=======
 # === CÁC HÀM TRỢ GIÚP ===
 
 def manhattan_distance(pos1: Tuple[int, int], pos2: Tuple[int, int]) -> int:
     return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+
+# --- ĐÃ XÓA HÀM a_star ---
+# --- ĐÃ XÓA HÀM plan_path_through_waypoints ---
 
 def encode_visited(wp_list, visited_set):
     code = 0
@@ -49,64 +50,21 @@ gamma = 0.99
 epsilon = 1.0
 epsilon_min = 0.01
 epsilon_decay = 0.995
+# Bạn có thể cần tăng num_episodes lên nhiều hơn (ví dụ: 50000 hoặc 100000)
 num_episodes = 10000 
 max_steps_per_episode = 100
 
->>>>>>> Stashed changes
 actions = ['up', 'right', 'down', 'left']
-gamma = 0.9
-alpha = 0.1
-epsilon = 0.1
-episodes = 5000
 
-<<<<<<< Updated upstream
-# Tạo folder models tuyệt đối
-BASE_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "models"))
-os.makedirs(BASE_DIR, exist_ok=True)
-q_path = os.path.join(BASE_DIR, "qlearning_qtable.pkl")
-
-# Load Q-table nếu đã tồn tại
-if os.path.exists(q_path):
-    with open(q_path, "rb") as f:
-        Q = pickle.load(f)
-    print(f"✅ Loaded existing Q-learning Q-table, tổng state = {len(Q)}")
-else:
-    Q = {}
-=======
 # === CÀI ĐẶT MÔI TRƯỜNG ===
 width, height = 10, 8
 start = (0, 0)
 goal = (9, 7)
 obstacles = [(1,1), (2,3), (4,4), (5,1), (7,6)]
 waypoints = [(3,2), (6,5)]
->>>>>>> Stashed changes
 
-def choose_action(state):
-    if state not in Q:
-        Q[state] = {a: 0.0 for a in actions}
-    if random.random() < epsilon:
-        return random.choice(actions)
-    return max(Q[state], key=Q[state].get)
+env = GridWorldEnv(width, height, start, goal, obstacles, waypoints, max_steps=max_steps_per_episode)
 
-<<<<<<< Updated upstream
-for ep in range(episodes):
-    state = tuple(env.reset())
-    done = False
-    while not done:
-        action = choose_action(state)
-        action_idx = actions.index(action)
-        next_state, reward, done, _ = env.step(action_idx)
-        next_state = tuple(next_state)
-        if next_state not in Q:
-            Q[next_state] = {a: 0.0 for a in actions}
-        Q[state][action] += alpha * (reward + gamma * max(Q[next_state].values()) - Q[state][action])
-        state = next_state
-
-# Lưu Q-table
-with open(q_path, "wb") as f:
-    pickle.dump(Q, f)
-print(f"Q-learning training xong! Saved at {q_path}")
-=======
 env.step_penalty = -2.0
 env.revisit_penalty = -3.0
 env.waypoint_reward = 30.0
@@ -118,7 +76,8 @@ env.goal_before_waypoints_penalty = -10.0
 # Q-table giờ là một defaultdict trống, tất cả giá trị Q mặc định là 0.0
 ql_Q = defaultdict(lambda: {a: 0.0 for a in actions})
 
-print("Bắt đầu huấn luyện Q-learning thuần túy ...")
+# --- ĐÃ XÓA KHỐI CODE HƯỚNG DẪN BẰNG A* ---
+print("Bắt đầu huấn luyện Q-learning thuần túy (không có A* guidance)...")
 
 # === VÒNG LẶP HUẤN LUYỆN (Theo Mã giả) ===
 
@@ -128,6 +87,7 @@ total_rewards = []
 for episode in range(num_episodes):
     
     # 3. Initialize s
+    # Kỹ thuật "Exploring Starts" của bạn (nâng cao hơn mã giả gốc)
     env.reset(start=start, goal=goal, obstacles=obstacles, waypoints=waypoints)
     all_cells = [(x, y) for x in range(width) for y in range(height) if (x, y) not in env.obstacles]
     env.state = random.choice(all_cells)
@@ -196,4 +156,3 @@ with open(QL_QFILE_OFFLINE, 'wb') as f:
     pickle.dump(dict(ql_Q), f)
 
 print(f"Q-table được lưu tại: {QL_QFILE_OFFLINE}")
->>>>>>> Stashed changes
