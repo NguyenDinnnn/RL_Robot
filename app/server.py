@@ -1,6 +1,5 @@
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
-from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Tuple, Optional
 from threading import Lock
@@ -78,7 +77,6 @@ if os.path.exists(sarsa_qfile):
         loaded_sarsa_Q = pickle.load(f)
     sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
     sarsa_Q.update(loaded_sarsa_Q)
-    
     print(f"✅ Đã tải Q-table SARSA, tổng số state đã biết = {len(sarsa_Q)}")
 else:
     sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
@@ -112,6 +110,7 @@ alpha, gamma = 0.1, 0.99
 epsilon = 1.0
 epsilon_min = 0.01
 epsilon_decay = 0.995
+
 # ---------------------------
 # Request Models
 # ---------------------------
@@ -144,14 +143,13 @@ def encode_visited(wp_list, visited_set):
 def manhattan_distance(pos1: Tuple[int, int], pos2: Tuple[int, int]) -> int:
     return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
 
-# Hàm chọn target waypoint chưa thăm gần nhất (thêm vào server)
 def select_next_target(env):
     unvisited_waypoints = set(env.waypoints) - env.visited_waypoints
     if unvisited_waypoints:
         return min(unvisited_waypoints, key=lambda wp: manhattan_distance(env.get_state(), wp))
     else:
         return env.goal
-    
+
 # ---------------------------
 # A* functions
 # ---------------------------
@@ -202,7 +200,6 @@ def plan_path_through_waypoints(start, waypoints, goal, obstacles, width, height
 # Extend GridWorldEnv for A* step
 # ---------------------------
 def step_to_rl(self, target):
-    prev_state = self.state
     self.state = target
     self.steps += 1
     reward = -0.1  # Đồng bộ với A* reward trong server
@@ -222,7 +219,6 @@ def step_to_rl(self, target):
             info["event"] = "goal"
         else:
             reward += self.goal_before_waypoints_penalty
-            done = False
             info["event"] = "goal_before_waypoints"
     if self.max_steps is not None and self.steps >= self.max_steps and not done:
         done = True
@@ -335,35 +331,52 @@ def run_qlearning_greedy():
         scheduled_idx = 0
         state_xy = start_xy
         visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-        dist_to_next = min([manhattan_distance(state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                           [manhattan_distance(state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
+
+        # dist_to_next theo các waypoint chưa thăm → nếu hết thì đến goal
+        unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+        if unvisited_wps:
+            dist_to_next = min([manhattan_distance(state_xy, wp) for wp in unvisited_wps])
+        else:
+            dist_to_next = manhattan_distance(state_xy, env.goal)
+
         full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
         done = False
         total_reward = 0
         steps = 0
         rewards_over_time = []
         path = [start_xy]
-        while not done and steps < env.max_steps and scheduled_idx < len(schedule):
-            target = schedule[scheduled_idx]
+
+        # Vòng lặp theo done/steps
+        while not done and steps < env.max_steps:
+            target = schedule[scheduled_idx] if scheduled_idx < len(schedule) else env.goal
+
             if full_state in ql_Q and any(ql_Q[full_state].values()):
                 max_q = max(ql_Q[full_state].values())
                 best_actions = [a for a, q in ql_Q[full_state].items() if q == max_q]
                 action_name = random.choice(best_actions)
             else:
-                action_name = random.choice(actions)  # Fallback nếu không có Q-value
+                action_name = random.choice(actions)  # fallback
+
             action_idx = actions.index(action_name)
             next_state_xy, reward, done_env, _ = env.step(action_idx)
-            if next_state_xy == target:
-                scheduled_idx += 1 
+
+            if next_state_xy == target and scheduled_idx < len(schedule) - 1:
+                scheduled_idx += 1
+
             visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                               [manhattan_distance(next_state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
+            unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+            if unvisited_wps:
+                dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in unvisited_wps])
+            else:
+                dist_to_next = manhattan_distance(next_state_xy, env.goal)
+
             full_state = (next_state_xy[0], next_state_xy[1], visited_code, dist_to_next)
-            done = done_env 
+            done = done_env
             total_reward += reward
             rewards_over_time.append(total_reward)
             steps += 1
             path.append(next_state_xy)
+
         elapsed_time = time.time() - start_time
         return {
             "algorithm": "Q-Learning (Offline/Greedy, Waypoint Scheduling)",
@@ -381,7 +394,6 @@ def run_qlearning_greedy():
 @app.post("/run_mc_greedy")
 def run_mc_greedy():
     global mc_Q
-
     with _env_lock:
         start_time = time.time()
         start_xy = env.reset()
@@ -390,22 +402,29 @@ def run_mc_greedy():
         scheduled_idx = 0
         state_xy = start_xy
         visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-        dist_to_next = min([manhattan_distance(state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                           [manhattan_distance(state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
+
+        unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+        if unvisited_wps:
+            dist_to_next = min([manhattan_distance(state_xy, wp) for wp in unvisited_wps])
+        else:
+            dist_to_next = manhattan_distance(state_xy, env.goal)
+
         full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
         done = False
         total_reward = 0
         steps = 0
         rewards_over_time = []
         path = [start_xy]
-        while not done and steps < env.max_steps and scheduled_idx < len(schedule):
-            target = schedule[scheduled_idx]
+
+        while not done and steps < env.max_steps:
+            target = schedule[scheduled_idx] if scheduled_idx < len(schedule) else env.goal
+
             if full_state in mc_Q and any(mc_Q[full_state].values()):
                 max_q = max(mc_Q[full_state].values())
                 best_actions = [a for a, q in mc_Q[full_state].items() if q == max_q]
                 action_name = random.choice(best_actions)
             else:
-                # Fallback to A* if state not in Q-table
+                # Fallback A* nếu state chưa biết
                 path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
                 if len(path_to_target) > 1:
                     next_pos = path_to_target[1]
@@ -414,19 +433,27 @@ def run_mc_greedy():
                     action_name = actions[action_idx]
                 else:
                     action_name = random.choice(actions)
+
             action_idx = actions.index(action_name)
             next_state_xy, reward, done_env, _ = env.step(action_idx)
-            if next_state_xy == target:
-                scheduled_idx += 1 
+
+            if next_state_xy == target and scheduled_idx < len(schedule) - 1:
+                scheduled_idx += 1
+
             visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                               [manhattan_distance(next_state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
+            unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+            if unvisited_wps:
+                dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in unvisited_wps])
+            else:
+                dist_to_next = manhattan_distance(next_state_xy, env.goal)
+
             full_state = (next_state_xy[0], next_state_xy[1], visited_code, dist_to_next)
-            done = done_env 
+            done = done_env
             total_reward += reward
             rewards_over_time.append(total_reward)
             steps += 1
             path.append(next_state_xy)
+
         elapsed_time = time.time() - start_time
         return {
             "algorithm": "MC (Offline/Greedy, Waypoint Scheduling)",
@@ -440,31 +467,35 @@ def run_mc_greedy():
             "elapsed_time": elapsed_time,
             "rewards_over_time": rewards_over_time
         }
-    
+
 @app.post("/step_algorithm")
 def step_algorithm(req: AlgorithmRequest):
     global epsilon, trajectory, mc_Q
     algo = req.algorithm
     with _env_lock:
+        # trajectory (dùng cho MC)
         if 'trajectory' not in globals() or trajectory is None:
             trajectory = []
 
         state_xy = env.get_state()
-        done = False
         reward = 0
         visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-        dist_to_next = min([manhattan_distance(state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] +
-                           [manhattan_distance(state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
+
+        unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+        if unvisited_wps:
+            dist_to_next = min([manhattan_distance(state_xy, wp) for wp in unvisited_wps])
+        else:
+            dist_to_next = manhattan_distance(state_xy, env.goal)
+
         full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
+        done = False
 
         if algo == "MC":
-            # use global epsilon (declared above)
             if np.random.rand() > epsilon:
                 if full_state in mc_Q and any(mc_Q[full_state].values()):
                     action_name = max(mc_Q[full_state], key=mc_Q[full_state].get)
                 else:
-                    # Fallback to A* if state not in Q-table
-                    target = env.waypoints[0] if env.waypoints and env.visited_waypoints != set(env.waypoints) else env.goal
+                    target = select_next_target(env)
                     path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
                     if len(path_to_target) > 1:
                         next_pos = path_to_target[1]
@@ -479,19 +510,12 @@ def step_algorithm(req: AlgorithmRequest):
             action_idx = actions.index(action_name)
             next_state, r, done, _ = env.step(action_idx)
 
-            next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            next_dist_to_next = min([manhattan_distance(next_state, wp) for wp in env.waypoints if wp not in env.visited_waypoints] +
-                                    [manhattan_distance(next_state, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
-            next_state_tuple = (next_state[0], next_state[1], next_visited_code, next_dist_to_next)
-
-            # append to trajectory (for every step in MC)
+            # log trajectory + MC first-visit update khi kết thúc episode
             trajectory.append((full_state, action_name, r))
-
             reward = r
             state_xy = next_state
 
             if done or env.steps >= env.max_steps:
-                # First-visit MC update
                 G = 0
                 visited_state_actions = set()
                 for state, action, r in reversed(trajectory):
@@ -503,61 +527,31 @@ def step_algorithm(req: AlgorithmRequest):
                         mc_Q[state][action] += alpha * (G - old_q)
                 trajectory = []
 
-            # update epsilon after the episode-step (still global)
             epsilon = max(epsilon_min, epsilon * epsilon_decay)
 
         elif algo == "Q-learning":
-            # Chạy Greedy trên Q-table đã tải (Không online training)
+            # Greedy theo Q-table đã huấn luyện, KHÔNG train online
             if full_state in ql_Q and any(ql_Q[full_state].values()):
                 action_name = max(ql_Q[full_state], key=ql_Q[full_state].get)
             else:
-                # fallback to small exploration if Q not known
                 action_name = np.random.choice(actions)
 
             action_idx = actions.index(action_name)
-
             next_state, r, done, _ = env.step(action_idx)
-
-            # Cập nhật trạng thái
-            next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            next_dist_to_next = min([manhattan_distance(next_state, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                                    [manhattan_distance(next_state, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
-            next_state_tuple = (next_state[0], next_state[1], next_visited_code, next_dist_to_next)
-            trajectory.append((full_state, action_name, r))
             reward = r
             state_xy = next_state
-            if done or env.steps >= env.max_steps:
-                G = 0
-                visited_state_actions = set()
-                for state, action, r in reversed(trajectory):
-                    G = r + gamma * G
-                    state_action = (state, action)
-                    if state_action not in visited_state_actions:
-                        visited_state_actions.add(state_action)
-                        old_q = mc_Q[state][action]
-                        mc_Q[state][action] += alpha * (G - old_q)
-                trajectory = []
-            epsilon = max(epsilon_min, epsilon * epsilon_decay)
+            # (không trajectory/không update ql_Q)
 
         elif algo == "SARSA":
-            # 1. Dùng đúng định dạng state (3 thành phần) đã được huấn luyện.
-            visited_code = encode_visited(env.waypoints, env.visited_waypoints)
             sarsa_state = (state_xy[0], state_xy[1], visited_code)
-
-            # 2. Chuyển sang chế độ khai thác (exploitation), không huấn luyện online.
-            # Luôn chọn hành động tốt nhất (greedy) từ Q-table đã học.
             if sarsa_state in sarsa_Q and any(sarsa_Q[sarsa_state].values()):
                 max_q = max(sarsa_Q[sarsa_state].values())
                 best_actions = [a for a, q in sarsa_Q[sarsa_state].items() if q == max_q]
                 action_name = random.choice(best_actions)
             else:
-                # Nếu không biết trạng thái này, hành động ngẫu nhiên.
                 action_name = np.random.choice(actions)
-            
             action_idx = actions.index(action_name)
             next_state, r, done, _ = env.step(action_idx)
-
-            # Cập nhật các biến trả về
             state_xy = next_state
             reward = r
 
@@ -565,39 +559,29 @@ def step_algorithm(req: AlgorithmRequest):
             if not a2c_model_loaded:
                 raise HTTPException(status_code=400, detail="A2C model not loaded. Please train or load a valid model.")
 
-            # Waypoint scheduling: chọn target chưa thăm gần nhất
             target = select_next_target(env)
-
             state_tensor = env.build_grid_state().unsqueeze(0)
             a2c_model.eval()
             with torch.no_grad():
                 policy_logits, _ = a2c_model(state_tensor)
-                # Check for inf/nan in logits
                 if torch.isnan(policy_logits).any() or torch.isinf(policy_logits).any():
-                    print(f"Warning: policy_logits contains nan/inf: {policy_logits.tolist()}")
-                    # Fallback to random action if logits are invalid
                     action_idx = random.choice(range(n_actions))
                 else:
                     action_probs = F.softmax(policy_logits, dim=-1).squeeze(0)
-                    # Check for inf/nan in probabilities
                     if torch.isnan(action_probs).any() or torch.isinf(action_probs).any() or (action_probs < 0).any():
-                        print(f"Warning: action_probs contains invalid values: {action_probs.tolist()}")
                         action_idx = random.choice(range(n_actions))
                     else:
-                        # Epsilon-greedy action selection
                         if random.random() < epsilon:
                             action_idx = random.choice(range(n_actions))
                         else:
                             try:
                                 action_idx = torch.multinomial(action_probs, 1).item()
-                            except RuntimeError as e:
-                                print(f"Error in multinomial: {str(e)}, action_probs: {action_probs.tolist()}")
+                            except RuntimeError:
                                 action_idx = random.choice(range(n_actions))
 
-            print(f"A2C action_probs: {action_probs.tolist() if 'action_probs' in locals() else 'invalid'}, chosen action: {action_idx}, state: {state_xy}, target: {target}")
             next_state, r, done, _ = env.step(action_idx)
 
-            # Enhanced A* fallback: trigger if no progress toward target or bad reward
+            # A* fallback nếu không tiến gần target hoặc ăn reward xấu
             current_dist = manhattan_distance(state_xy, target)
             next_dist = manhattan_distance(next_state, target)
             if r <= env.obstacle_penalty or r == env.wall_penalty or (next_dist >= current_dist and r == env.step_penalty):
@@ -608,15 +592,13 @@ def step_algorithm(req: AlgorithmRequest):
                     try:
                         action_idx = env.ACTIONS.index((dx, dy))
                         next_state, r, done, _ = env.step(action_idx)
-                        print(f"A* fallback triggered: new action: {action_idx}, new state: {next_state}, reward: {r}")
                     except ValueError:
-                        print(f"A* fallback failed: invalid action from {state_xy} to {next_pos}")
+                        pass
 
             reward = r
             state_xy = next_state
             epsilon = max(epsilon_min, epsilon * epsilon_decay)
-            print(f"A2C step: state: {state_xy}, reward: {r}, done: {done}, steps: {env.steps}, visited: {env.visited_waypoints}")
-            
+
         return {
             "state": state_xy,
             "reward": reward,
@@ -659,19 +641,19 @@ def run_a_star(req: AStarRequest):
 @app.post("/save_qlearning")
 def save_qlearning():
     with open(QL_QFILE_OFFLINE, 'wb') as f:
-        pickle.dump(ql_Q, f)
+        pickle.dump(dict(ql_Q), f)
     return {"status": "Q-learning Q-table saved to offline file"}
 
 @app.post("/save_mc")
 def save_mc():
     with open(os.path.join(models_dir, 'mc_qtable.pkl'), 'wb') as f:
-        pickle.dump(mc_Q, f)
+        pickle.dump(dict(mc_Q), f)
     return {"status": "MC Q-table saved"}
 
 @app.post("/save_sarsa")
 def save_sarsa():
     with open(os.path.join(models_dir, 'sarsa_qtable.pkl'), 'wb') as f:
-        pickle.dump(sarsa_Q, f)
+        pickle.dump(dict(sarsa_Q), f)
     return {"status": "SARSA Q-table saved"}
 
 @app.post("/save_a2c")
