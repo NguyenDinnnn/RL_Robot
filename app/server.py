@@ -1,4 +1,8 @@
+<<<<<<< Updated upstream
 from fastapi import FastAPI
+=======
+from fastapi import FastAPI, HTTPException
+>>>>>>> Stashed changes
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Tuple, Optional
@@ -333,34 +337,62 @@ def run_qlearning_greedy():
         steps = 0
         rewards_over_time = []
         path = [start_xy]
+<<<<<<< Updated upstream
 
         while not done and steps < env.max_steps and scheduled_idx < len(schedule):
             # Target hiện tại robot cần đến
             target = schedule[scheduled_idx]
 
             # Choose greedy action
+=======
+        
+        # Sửa: Vòng lặp chính nên dựa trên done và steps, không phải scheduled_idx
+        while not done and steps < env.max_steps:
+            target = schedule[scheduled_idx] if scheduled_idx < len(schedule) else env.goal
+
+>>>>>>> Stashed changes
             if full_state in ql_Q and any(ql_Q[full_state].values()):
                 max_q = max(ql_Q[full_state].values())
                 best_actions = [a for a, q in ql_Q[full_state].items() if q == max_q]
                 action_name = random.choice(best_actions)
             else:
+<<<<<<< Updated upstream
                 # Fallback nếu trạng thái chưa được học
                 action_name = random.choice(actions)
 
+=======
+                action_name = random.choice(actions)  # Fallback nếu không có Q-value
+            
+>>>>>>> Stashed changes
             action_idx = actions.index(action_name)
 
             # Take step
             next_state_xy, reward, done_env, _ = env.step(action_idx)
             
+<<<<<<< Updated upstream
             # Logic update schedule và index:
             if next_state_xy == target:
                 # Nếu đạt mục tiêu hiện tại, chuyển sang mục tiêu kế tiếp
                 scheduled_idx += 1 
             
             # Cập nhật trạng thái đầy đủ (x, y, visited_code, dist_to_next)
+=======
+            # Cập nhật scheduled_idx nếu đạt được mục tiêu *hiện tại*
+            if next_state_xy == target and scheduled_idx < len(schedule) - 1:
+                scheduled_idx += 1 
+            
+>>>>>>> Stashed changes
             visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                               [manhattan_distance(next_state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
+            
+            # Cập nhật dist_to_next dựa trên mục tiêu *mới*
+            next_target = schedule[scheduled_idx] if scheduled_idx < len(schedule) else env.goal
+            unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+            
+            if unvisited_wps:
+                 dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in unvisited_wps])
+            else:
+                 dist_to_next = manhattan_distance(next_state_xy, env.goal)
+
             full_state = (next_state_xy[0], next_state_xy[1], visited_code, dist_to_next)
 
             # Cập nhật trạng thái kết thúc
@@ -402,19 +434,116 @@ def step_algorithm(req: AlgorithmRequest):
         dist_to_next = min([manhattan_distance(state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
                            [manhattan_distance(state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
         full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
+<<<<<<< Updated upstream
+=======
+        done = False
+        total_reward = 0
+        steps = 0
+        rewards_over_time = []
+        path = [start_xy]
+        
+        while not done and steps < env.max_steps:
+            target = schedule[scheduled_idx] if scheduled_idx < len(schedule) else env.goal
+            
+            if full_state in mc_Q and any(mc_Q[full_state].values()):
+                max_q = max(mc_Q[full_state].values())
+                best_actions = [a for a, q in mc_Q[full_state].items() if q == max_q]
+                action_name = random.choice(best_actions)
+            else:
+                # Fallback to A* if state not in Q-table
+                path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
+                if len(path_to_target) > 1:
+                    next_pos = path_to_target[1]
+                    dx, dy = next_pos[0] - state_xy[0], next_pos[1] - state_xy[1]
+                    action_idx = env.ACTIONS.index((dx, dy))
+                    action_name = actions[action_idx]
+                else:
+                    action_name = random.choice(actions)
+            
+            action_idx = actions.index(action_name)
+            next_state_xy, reward, done_env, _ = env.step(action_idx)
+            
+            if next_state_xy == target and scheduled_idx < len(schedule) - 1:
+                scheduled_idx += 1 
+            
+            visited_code = encode_visited(env.waypoints, env.visited_waypoints)
+            unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+            if unvisited_wps:
+                 dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in unvisited_wps])
+            else:
+                 dist_to_next = manhattan_distance(next_state_xy, env.goal)
+
+            full_state = (next_state_xy[0], next_state_xy[1], visited_code, dist_to_next)
+            done = done_env 
+            total_reward += reward
+            rewards_over_time.append(total_reward)
+            steps += 1
+            path.append(next_state_xy)
+
+        elapsed_time = time.time() - start_time
+        return {
+            "algorithm": "MC (Offline/Greedy, Waypoint Scheduling)",
+            "path": path,
+            "state": env.get_state(),
+            "reward": total_reward,
+            "done": done,
+            "steps": steps,
+            "visited_waypoints": list(env.visited_waypoints),
+            "ascii": env.render_ascii(),
+            "elapsed_time": elapsed_time,
+            "rewards_over_time": rewards_over_time
+        }
+    
+@app.post("/step_algorithm")
+def step_algorithm(req: AlgorithmRequest):
+    global epsilon, trajectory, mc_Q
+    algo = req.algorithm
+    with _env_lock:
+        # Ensure trajectory exists (used by MC)
+        if 'trajectory' not in globals() or trajectory is None:
+            trajectory = []
+
+        state_xy = env.get_state()
+        done = False
+        reward = 0
+        visited_code = encode_visited(env.waypoints, env.visited_waypoints)
+        
+        # Cập nhật logic tính dist_to_next
+        unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+        if unvisited_wps:
+            dist_to_next = min([manhattan_distance(state_xy, wp) for wp in unvisited_wps])
+        else:
+            dist_to_next = manhattan_distance(state_xy, env.goal)
+            
+        full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
+>>>>>>> Stashed changes
 
         if algo == "MC":
             if np.random.rand() > epsilon:
                 if full_state in mc_Q and any(mc_Q[full_state].values()):
                      action_name = max(mc_Q[full_state], key=mc_Q[full_state].get)
                 else:
+<<<<<<< Updated upstream
                      action_name = np.random.choice(actions)
+=======
+                    # Fallback to A* if state not in Q-table
+                    target = select_next_target(env) # Sử dụng hàm chọn target
+                    path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
+                    if len(path_to_target) > 1:
+                        next_pos = path_to_target[1]
+                        dx, dy = next_pos[0] - state_xy[0], next_pos[1] - state_xy[1]
+                        action_idx = env.ACTIONS.index((dx, dy))
+                        action_name = actions[action_idx]
+                    else:
+                        action_name = np.random.choice(actions)
+>>>>>>> Stashed changes
             else:
                 action_name = np.random.choice(actions)
             action_idx = actions.index(action_name)
 
             next_state, r, done, _ = env.step(action_idx)
 
+<<<<<<< Updated upstream
             # Update for MC (stepwise update approximation)
             next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
             next_state_tuple = (next_state[0], next_state[1], next_visited_code)
@@ -424,8 +553,33 @@ def step_algorithm(req: AlgorithmRequest):
 
             reward = r
             state_xy = next_state
+=======
+            # Cập nhật trạng thái
+            reward = r
+            state_xy = next_state
+
+            # append to trajectory (for every step in MC)
+            trajectory.append((full_state, action_name, r))
+
+            if done or env.steps >= env.max_steps:
+                # First-visit MC update
+                G = 0
+                visited_state_actions = set()
+                for state, action, r in reversed(trajectory):
+                    G = r + gamma * G
+                    state_action = (state, action)
+                    if state_action not in visited_state_actions:
+                        visited_state_actions.add(state_action)
+                        old_q = mc_Q[state][action]
+                        mc_Q[state][action] += alpha * (G - old_q)
+                trajectory = []
+
+            # update epsilon after the episode-step (still global)
+            epsilon = max(epsilon_min, epsilon * epsilon_decay)
+>>>>>>> Stashed changes
 
         elif algo == "Q-learning":
+            # *** PHẦN ĐÃ SỬA ***
             # Chạy Greedy trên Q-table đã tải (Không online training)
             if full_state in ql_Q and any(ql_Q[full_state].values()):
                 action_name = max(ql_Q[full_state], key=ql_Q[full_state].get)
@@ -438,6 +592,7 @@ def step_algorithm(req: AlgorithmRequest):
             next_state, r, done, _ = env.step(action_idx)
 
             # Cập nhật trạng thái
+<<<<<<< Updated upstream
             next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
             next_dist_to_next = min([manhattan_distance(next_state, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
                                     [manhattan_distance(next_state, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
@@ -445,6 +600,12 @@ def step_algorithm(req: AlgorithmRequest):
 
             state_xy = next_state
             reward = r
+=======
+            reward = r
+            state_xy = next_state
+            
+            # --- ĐÃ XÓA LOGIC HUẤN LUYỆN ONLINE/TRAJECTORY ---
+>>>>>>> Stashed changes
 
         elif algo == "SARSA":
             if np.random.rand() < epsilon:
@@ -540,21 +701,25 @@ def run_a_star(req: AStarRequest):
 # ---------------------------
 @app.post("/save_qlearning")
 def save_qlearning():
+<<<<<<< Updated upstream
     # Lưu Q-table vào file offline (khớp với file load)
+=======
+    # Sửa: Đảm bảo lưu dict(ql_Q)
+>>>>>>> Stashed changes
     with open(QL_QFILE_OFFLINE, 'wb') as f:
-        pickle.dump(ql_Q, f)
+        pickle.dump(dict(ql_Q), f)
     return {"status": "Q-learning Q-table saved to offline file"}
 
 @app.post("/save_mc")
 def save_mc():
     with open(os.path.join(models_dir, 'mc_qtable.pkl'), 'wb') as f:
-        pickle.dump(mc_Q, f)
+        pickle.dump(dict(mc_Q), f) # Sửa: lưu dict(mc_Q)
     return {"status": "MC Q-table saved"}
 
 @app.post("/save_sarsa")
 def save_sarsa():
     with open(os.path.join(models_dir, 'sarsa_qtable.pkl'), 'wb') as f:
-        pickle.dump(sarsa_Q, f)
+        pickle.dump(dict(sarsa_Q), f) # Sửa: lưu dict(sarsa_Q)
     return {"status": "SARSA Q-table saved"}
 
 @app.post("/save_a2c")
@@ -569,5 +734,9 @@ def root():
 
 if __name__ == "__main__":
     import uvicorn
+<<<<<<< Updated upstream
     # Vui lòng đảm bảo thư mục gốc của uvicorn là nơi chứa file server này
     uvicorn.run("app.server:app", host="0.0.0.0", port=8000, reload=True)
+=======
+    uvicorn.run("app.server:app", host="0.0.0.0", port=8000, reload=True)
+>>>>>>> Stashed changes
