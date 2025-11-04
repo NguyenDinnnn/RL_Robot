@@ -85,23 +85,25 @@ else:
 # ---------------------------
 # Load A2C
 # ---------------------------
-a2c_model_file = os.path.join(models_dir, "a2c_model.pth")
-in_channels = 5
-height, width = env.height, env.width
-n_actions = len(env.ACTIONS)
-a2c_model = ActorCritic(in_channels, height, width, n_actions)
-a2c_model_loaded = False
-if os.path.exists(a2c_model_file):
+a2c_model_file = os.path.join(models_dir, "a2c_model.pth") # Định nghĩa đường dẫn file checkpoint mô hình A2C.
+in_channels = 5 # Số lượng kênh đầu vào (ví dụ: các lớp bản đồ trạng thái trong GridWorld).
+height, width = env.height, env.width # Kích thước lưới môi trường.
+n_actions = len(env.ACTIONS) # Số lượng hành động có thể có (ví dụ: 4: lên, xuống, trái, phải).
+a2c_model = ActorCritic(in_channels, height, width, n_actions) # Khởi tạo kiến trúc mạng ActorCritic.
+a2c_model_loaded = False # Cờ (flag) để theo dõi trạng thái tải mô hình.
+
+if os.path.exists(a2c_model_file): # Kiểm tra xem file mô hình đã lưu có tồn tại không.
     try:
-        a2c_model.load_state_dict(torch.load(a2c_model_file))
-        a2c_model.eval()
-        a2c_model_loaded = True
-        print("✅ A2C model loaded successfully")
+        a2c_model.load_state_dict(torch.load(a2c_model_file)) # Tải các tham số (trọng số) đã lưu vào mô hình đã khởi tạo.
+        a2c_model.eval() # Đặt mô hình vào chế độ đánh giá (evaluation mode), tắt dropout/batchnorm (nếu có).
+        a2c_model_loaded = True # Đặt cờ thành True.
+        print("✅ A2C model loaded successfully") # Thông báo tải thành công.
     except RuntimeError as e:
+        # Xử lý lỗi nếu cấu trúc mô hình không khớp với file đã lưu.
         print(f"⚠️ Không load được A2C checkpoint: {str(e)}. Sẽ dùng model mới.")
 else:
+    # Thông báo nếu không tìm thấy file mô hình đã huấn luyện.
     print(f"⚠️ File A2C model {a2c_model_file} không tồn tại. Hãy huấn luyện trước bằng train_a2c.py.")
-
 # ---------------------------
 # RL params
 # ---------------------------
