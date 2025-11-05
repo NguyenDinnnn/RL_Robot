@@ -4,12 +4,10 @@
 <meta charset="utf-8">
 <title>ỨNG DỤNG HỌC TĂNG CƯỜNG TRONG VIỆC TỐI ƯU HÓA ĐƯỜNG ĐI CỦA ROBOT</title>
 <link rel="stylesheet" href="./style.css">
-
 </head>
 <body>
 <div class="main-container">
 
-  <!-- HÀNG 1: Môi trường (trái) + Điều khiển (phải) -->
   <div class="row">
     <div class="card simulation-card">
       <div class="card-header">
@@ -60,7 +58,6 @@
                     
           <div class="button-group">
             <button class="btn btn-reset" onclick="resetGrid()">🔄 Reset</button>
-            <!-- <button class="btn btn-reset" onclick="resetAllGrid()">🌍 Reset All</button> -->
             <button class="btn btn-debug" onclick="toggleDebug()">🔧 Debug</button>
           </div>
           
@@ -86,6 +83,8 @@
             <button class="btn-algorithm" onclick="runAlgorithm('Q-learning')">Q-Learning</button>
             <button class="btn-algorithm" onclick="runAlgorithm('SARSA')">SARSA</button>
             <button class="btn-algorithm" onclick="runAlgorithm('A2C')">A2C</button>
+            
+            <button class="btn-algorithm" onclick="runAlgorithm('PPO')">PPO</button>
             <button class="btn-algorithm" onclick="runAStar()">A*</button>
           </div>
         </div>
@@ -93,7 +92,6 @@
     </div>
   </div>
 
-  <!-- HÀNG 2: Reward (trái) + Thống kê hiệu suất (phải) -->
   <div class="row">
     <div class="card stats-card">
       <div class="card-header">
