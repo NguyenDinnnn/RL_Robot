@@ -47,13 +47,73 @@ os.makedirs(models_dir, exist_ok=True)
 # Load MC
 # ---------------------------
 mc_qfile = os.path.join(models_dir, "mc_qtable.pkl")
-if os.path.exists(mc_qfile):
-    with open(mc_qfile, "rb") as f:
-        loaded_mc_Q = pickle.load(f)
-    mc_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
-    mc_Q.update(loaded_mc_Q)
+mc_returns_file = os.path.join(models_dir, "mc_returns.pkl")
+mc_policy_file = os.path.join(models_dir, "mc_policy.pkl")
+
+actions = ['up', 'right', 'down', 'left']
+num_actions = len(actions)
+
+# MÃ GIẢ DÒNG 1: pi(s) in A(s) (arbitrarily)
+mc_policy = defaultdict(lambda: random.choice(actions))
+
+# MÃ GIẢ DÒNG 2: Q(s, a) in R (arbitrarily)
+mc_Q = defaultdict(lambda: {a: 0.0 for a in actions})
+
+# MÃ GIẢ DÒNG 3: Returns(s, a) <- empty list
+mc_Returns = defaultdict(list)
+
+# --- Tải file (nếu có) ---
+if os.path.exists(mc_policy_file):
+    try:
+        with open(mc_policy_file, "rb") as f:
+            loaded_mc_policy = pickle.load(f)
+        if isinstance(loaded_mc_policy, dict):
+            # CẬP NHẬT TRỰC TIẾP
+            mc_policy.update(loaded_mc_policy)
+            print(f"✅ Đã tải Policy MC từ {mc_policy_file} (tổng {len(mc_policy)} state).")
+        else:
+            print(f"⚠️ Định dạng file Policy MC không đúng: {mc_policy_file}")
+    except Exception as e:
+        print(f"❌ Lỗi khi tải Policy MC: {e}")
 else:
-    mc_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
+    print(f"⚠️ File Policy MC {mc_policy_file} không tồn tại.")
+
+if os.path.exists(mc_qfile):
+    try:
+        with open(mc_qfile, "rb") as f:
+            loaded_mc_Q = pickle.load(f)
+        if isinstance(loaded_mc_Q, dict):
+            mc_Q.update(loaded_mc_Q)
+            print(f"✅ Đã tải Q-table MC từ file: {mc_qfile}")
+        else:
+            print(f"⚠️ Định dạng file Q-table MC không đúng: {mc_qfile}")
+    except Exception as e:
+        print(f"❌ Lỗi khi tải Q-table MC: {e}")
+else:
+    print(f"⚠️ File Q-table MC {mc_qfile} không tồn tại.")
+
+# Đồng bộ policy với Q-table (nếu policy thiếu state)
+# (Đây là bước quan trọng để đảm bảo policy luôn là argmax của Q)
+for s, qvals in mc_Q.items():
+    try:
+        best_action = max(qvals, key=lambda a: qvals[a])
+        mc_policy[s] = best_action
+    except Exception:
+        pass # Bỏ qua nếu qvals có vấn đề
+
+if os.path.exists(mc_returns_file):
+    try:
+        with open(mc_returns_file, "rb") as f:
+            loaded_mc_Returns = pickle.load(f)
+        if isinstance(loaded_mc_Returns, dict):
+            mc_Returns.update(loaded_mc_Returns)
+            print(f"✅ Đã tải Returns MC từ file: {mc_returns_file}")
+        else:
+            print(f"⚠️ Định dạng file Returns MC không đúng: {mc_returns_file}")
+    except Exception as e:
+        print(f"❌ Lỗi khi tải Returns MC: {e}")
+else:
+    print(f"⚠️ File Returns MC {mc_returns_file} không tồn tại (cần cho huấn luyện online).")
 
 # ---------------------------
 # Load Q-learning
@@ -67,7 +127,6 @@ if os.path.exists(QL_QFILE_OFFLINE):
     print(f"✅ Đã tải Q-table Q-Learning từ file OFFLINE: {QL_QFILE_OFFLINE}")
 else:
     print(f"⚠️ File Q-table Q-Learning {QL_QFILE_OFFLINE} không tồn tại. Hãy huấn luyện trước.")
-
 # ---------------------------
 # Load SARSA
 # ---------------------------
@@ -395,70 +454,67 @@ def run_qlearning_greedy():
 
 @app.post("/run_mc_greedy")
 def run_mc_greedy():
-    global mc_Q
+    global mc_policy, mc_Q
     with _env_lock:
         start_time = time.time()
         start_xy = env.reset()
         env.visited_waypoints = set()
-        schedule = list(env.waypoints) + [env.goal]
-        scheduled_idx = 0
         state_xy = start_xy
         visited_code = encode_visited(env.waypoints, env.visited_waypoints)
 
-        unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
-        if unvisited_wps:
-            dist_to_next = min([manhattan_distance(state_xy, wp) for wp in unvisited_wps])
-        else:
-            dist_to_next = manhattan_distance(state_xy, env.goal)
-
-        full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
+        # SỬA LỖI: MC dùng state 3-tuple
+        full_state = (state_xy[0], state_xy[1], visited_code)
+        
         done = False
         total_reward = 0
         steps = 0
         rewards_over_time = []
         path = [start_xy]
 
-        while not done and steps < env.max_steps:
-            target = schedule[scheduled_idx] if scheduled_idx < len(schedule) else env.goal
-
-            if full_state in mc_Q and any(mc_Q[full_state].values()):
-                max_q = max(mc_Q[full_state].values())
-                best_actions = [a for a, q in mc_Q[full_state].items() if q == max_q]
-                action_name = random.choice(best_actions)
+        while not done and (env.max_steps is None or steps < env.max_steps):
+            
+            # Ưu tiên policy đã học, sau đó mới đến Q-table
+            if full_state in mc_policy:
+                action_name = mc_policy[full_state]
+            elif full_state in mc_Q and any(mc_Q[full_state].values()):
+                try:
+                    action_name = max(mc_Q[full_state], key=lambda a: mc_Q[full_state].get(a, 0.0))
+                except Exception:
+                    action_name = random.choice(actions)
             else:
-                # Fallback A* nếu state chưa biết
+                # Fallback: Nếu state chưa từng thấy, dùng A* tạm thời
+                target = select_next_target(env) # Tìm mục tiêu gần nhất
                 path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
                 if len(path_to_target) > 1:
                     next_pos = path_to_target[1]
                     dx, dy = next_pos[0] - state_xy[0], next_pos[1] - state_xy[1]
-                    action_idx = env.ACTIONS.index((dx, dy))
-                    action_name = actions[action_idx]
+                    try:
+                        action_idx = env.ACTIONS.index((dx, dy))
+                        action_name = actions[action_idx]
+                    except ValueError:
+                        action_name = random.choice(actions)
                 else:
                     action_name = random.choice(actions)
 
             action_idx = actions.index(action_name)
             next_state_xy, reward, done_env, _ = env.step(action_idx)
 
-            if next_state_xy == target and scheduled_idx < len(schedule) - 1:
-                scheduled_idx += 1
-
             visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
-            if unvisited_wps:
-                dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in unvisited_wps])
-            else:
-                dist_to_next = manhattan_distance(next_state_xy, env.goal)
-
-            full_state = (next_state_xy[0], next_state_xy[1], visited_code, dist_to_next)
+            
+            # SỬA LỖI: MC dùng state 3-tuple
+            full_state = (next_state_xy[0], next_state_xy[1], visited_code)
             done = done_env
             total_reward += reward
             rewards_over_time.append(total_reward)
             steps += 1
             path.append(next_state_xy)
+            
+            # Cập nhật state_xy cho A* fallback (nếu cần)
+            state_xy = next_state_xy 
 
         elapsed_time = time.time() - start_time
         return {
-            "algorithm": "MC (Offline/Greedy, Waypoint Scheduling)",
+            "algorithm": "MC (Offline/Greedy)",
             "path": path,
             "state": env.get_state(),
             "reward": total_reward,
@@ -469,14 +525,14 @@ def run_mc_greedy():
             "elapsed_time": elapsed_time,
             "rewards_over_time": rewards_over_time
         }
-
+        
 @app.post("/step_algorithm")
 def step_algorithm(req: AlgorithmRequest):
-    global epsilon, trajectory, mc_Q
+    global epsilon, trajectory, mc_Q, mc_Returns, mc_policy
     algo = req.algorithm
     with _env_lock:
         # trajectory (dùng cho MC)
-        if 'trajectory' not in globals() or trajectory is None:
+        if globals().get("trajectory", None) is None:
             trajectory = []
 
         state_xy = env.get_state()
@@ -490,46 +546,75 @@ def step_algorithm(req: AlgorithmRequest):
             dist_to_next = manhattan_distance(state_xy, env.goal)
 
         full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
+        
         done = False
 
         if algo == "MC":
-            if np.random.rand() > epsilon:
-                if full_state in mc_Q and any(mc_Q[full_state].values()):
-                    action_name = max(mc_Q[full_state], key=mc_Q[full_state].get)
-                else:
-                    target = select_next_target(env)
-                    path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
-                    if len(path_to_target) > 1:
-                        next_pos = path_to_target[1]
-                        dx, dy = next_pos[0] - state_xy[0], next_pos[1] - state_xy[1]
-                        action_idx = env.ACTIONS.index((dx, dy))
-                        action_name = actions[action_idx]
-                    else:
-                        action_name = np.random.choice(actions)
+            # MC (từ train_mc.py) dùng 3-tuple
+            full_state = (state_xy[0], state_xy[1], visited_code)
+        elif algo == "SARSA":
+             # SARSA (từ code gốc) cũng dùng 3-tuple
+            full_state = (state_xy[0], state_xy[1], visited_code)
+        else:
+            # Q-Learning (từ code gốc) dùng 4-tuple
+            unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+            if unvisited_wps:
+                dist_to_next = min([manhattan_distance(state_xy, wp) for wp in unvisited_wps])
             else:
-                action_name = np.random.choice(actions)
-
+                dist_to_next = manhattan_distance(state_xy, env.goal)
+            
+            full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
+        done = False
+        
+        if algo == "MC":
+            # 1. Chọn hành động từ policy
+            # (Giống hệt logic "following pi" của train_mc_es_explicit.py)
+            if full_state not in mc_policy:
+                # Nếu state chưa có, fallback ngẫu nhiên và tạo policy
+                mc_policy[full_state] = random.choice(actions)
+                
+            action_name = mc_policy[full_state]
             action_idx = actions.index(action_name)
+            
+            # 2. Thực hiện hành động
             next_state, r, done, _ = env.step(action_idx)
 
-            # log trajectory + MC first-visit update khi kết thúc episode
+            # 3. Ghi nhận vào trajectory
             trajectory.append((full_state, action_name, r))
-            reward = r
-            state_xy = next_state
 
-            if done or env.steps >= env.max_steps:
+            reward = r
+            state_xy = next_state # Cập nhật state_xy cho response
+
+            # 4. Nếu hồi kết thúc -> Cập nhật theo đúng mã giả
+            if done or (env.max_steps is not None and env.steps >= env.max_steps):
                 G = 0
                 visited_state_actions = set()
-                for state, action, r in reversed(trajectory):
-                    G = r + gamma * G
-                    state_action = (state, action)
-                    if state_action not in visited_state_actions:
-                        visited_state_actions.add(state_action)
-                        old_q = mc_Q[state][action]
-                        mc_Q[state][action] += alpha * (G - old_q)
-                trajectory = []
+                
+                # Dòng: Loop for each step of episode, t = T-1, ... 0:
+                for state_update, action_update, r_step in reversed(trajectory):
+                    # Dòng: G <- gamma*G + R_{t+1}
+                    G = r_step + gamma * G
+                    state_action_update = (state_update, action_update)
+                    
+                    # Dòng: Unless the pair St, At appears in S0...
+                    if state_action_update not in visited_state_actions:
+                        visited_state_actions.add(state_action_update)
 
-            epsilon = max(epsilon_min, epsilon * epsilon_decay)
+                        # *** LOGIC CẬP NHẬT ĐÃ HỌC TỪ train_mc.py ***
+                        
+                        # Dòng 1: Append G to Returns(St, At)
+                        mc_Returns[state_action_update].append(G)
+
+                        # Dòng 2: Q(St, At) <- Average(Returns(St, At))
+                        mc_Q[state_update][action_update] = float(np.mean(mc_Returns[state_action_update]))
+
+                        # Dòng 3: pi(St) <- argmax_a Q(St, a)
+                        qvals = mc_Q[state_update]
+                        best_action_update = max(qvals.items(), key=lambda kv: kv[1])[0]
+                        mc_policy[state_update] = best_action_update
+
+                print(f"MC online episode finished. Updated {len(visited_state_actions)} pairs (Literal Average).")
+                trajectory = [] # Reset trajectory cho hồi mới
 
         elif algo == "Q-learning":
             # Greedy theo Q-table đã huấn luyện, KHÔNG train online
@@ -648,9 +733,23 @@ def save_qlearning():
 
 @app.post("/save_mc")
 def save_mc():
-    with open(os.path.join(models_dir, 'mc_qtable.pkl'), 'wb') as f:
-        pickle.dump(dict(mc_Q), f)
-    return {"status": "MC Q-table saved"}
+    global mc_Q, mc_Returns, mc_policy
+    try:
+        mc_q_path = os.path.join(models_dir, 'mc_qtable.pkl')
+        mc_returns_path = os.path.join(models_dir, 'mc_returns.pkl')
+        mc_policy_path = os.path.join(models_dir, 'mc_policy.pkl')
+
+        # Lưu dưới dạng dict thường để tránh lỗi pickle defaultdict
+        with open(mc_q_path, 'wb') as f:
+            pickle.dump(dict(mc_Q), f)
+        with open(mc_returns_path, 'wb') as f:
+            pickle.dump(dict(mc_Returns), f)
+        with open(mc_policy_path, 'wb') as f:
+            pickle.dump(dict(mc_policy), f)
+
+        return {"status": f"MC Q-table, Returns, và Policy saved to {models_dir}"}
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Error saving MC models: {str(e)}")
 
 @app.post("/save_sarsa")
 def save_sarsa():
