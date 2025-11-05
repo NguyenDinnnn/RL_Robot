@@ -7,8 +7,8 @@ import os, pickle, torch, numpy as np, time
 import heapq
 from itertools import permutations
 from collections import defaultdict
-import torch.nn.functional as F
-import random
+import torch.nn.functional as F  # Cần cho PPO/A2C
+import random                      # Cần cho PPO/A2C
 
 from app.robot_env import GridWorldEnv
 from clients.train_a2c import ActorCritic
@@ -19,6 +19,12 @@ from clients.train_a2c import ActorCritic
 app = FastAPI(title="RL Robot API", version="1.0.0")
 _env_lock = Lock()
 app.mount("/web", StaticFiles(directory=os.path.join(os.path.dirname(__file__), "../clients/web")), name="web")
+
+# --- (SỬA ĐỔI 1) ---
+# Thêm định nghĩa device (quan trọng để tải model)
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Server đang chạy trên thiết bị: {device}")
+# --------------------
 
 # ---------------------------
 # Environment
@@ -148,12 +154,16 @@ a2c_model_file = os.path.join(models_dir, "a2c_model.pth") # Định nghĩa đư
 in_channels = 5 # Số lượng kênh đầu vào (ví dụ: các lớp bản đồ trạng thái trong GridWorld).
 height, width = env.height, env.width # Kích thước lưới môi trường.
 n_actions = len(env.ACTIONS) # Số lượng hành động có thể có (ví dụ: 4: lên, xuống, trái, phải).
-a2c_model = ActorCritic(in_channels, height, width, n_actions) # Khởi tạo kiến trúc mạng ActorCritic.
+
+# === SỬA LỖI 1 (A2C Load): Thêm .to(device) ===
+a2c_model = ActorCritic(in_channels, height, width, n_actions).to(device) # Khởi tạo kiến trúc mạng ActorCritic.
 a2c_model_loaded = False # Cờ (flag) để theo dõi trạng thái tải mô hình.
 
 if os.path.exists(a2c_model_file): # Kiểm tra xem file mô hình đã lưu có tồn tại không.
     try:
-        a2c_model.load_state_dict(torch.load(a2c_model_file)) # Tải các tham số (trọng số) đã lưu vào mô hình đã khởi tạo.
+        # === SỬA LỖI 1 (A2C Load): Thêm map_location=device ===
+        a2c_model.load_state_dict(torch.load(a2c_model_file, map_location=device)) # Tải các tham số (trọng số) đã lưu vào mô hình đã khởi tạo.
+        
         a2c_model.eval() # Đặt mô hình vào chế độ đánh giá (evaluation mode), tắt dropout/batchnorm (nếu có).
         a2c_model_loaded = True # Đặt cờ thành True.
         print("✅ A2C model loaded successfully") # Thông báo tải thành công.
@@ -163,6 +173,26 @@ if os.path.exists(a2c_model_file): # Kiểm tra xem file mô hình đã lưu có
 else:
     # Thông báo nếu không tìm thấy file mô hình đã huấn luyện.
     print(f"⚠️ File A2C model {a2c_model_file} không tồn tại. Hãy huấn luyện trước bằng train_a2c.py.")
+
+# --- (THÊM MỚI 1) ---
+# ---------------------------
+# Load PPO
+# ---------------------------
+ppo_model_file = os.path.join(models_dir, "ppo_model.pth")
+# PPO dùng chung kiến trúc ActorCritic với A2C
+ppo_model = ActorCritic(in_channels, height, width, n_actions).to(device)
+ppo_model_loaded = False
+if os.path.exists(ppo_model_file):
+    try:
+        # Tải model với map_location
+        ppo_model.load_state_dict(torch.load(ppo_model_file, map_location=device))
+        ppo_model.eval()
+        ppo_model_loaded = True
+        print("✅ PPO model loaded successfully")
+    except RuntimeError as e:
+        print(f"⚠️ Không load được PPO checkpoint: {str(e)}.")
+else:
+    print(f"⚠️ File PPO model {ppo_model_file} không tồn tại. Hãy huấn luyện trước bằng train_ppo.py.")
 # ---------------------------
 # RL params
 # ---------------------------
@@ -538,13 +568,11 @@ def step_algorithm(req: AlgorithmRequest):
         state_xy = env.get_state()
         reward = 0
         visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-
         unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
         if unvisited_wps:
             dist_to_next = min([manhattan_distance(state_xy, wp) for wp in unvisited_wps])
         else:
             dist_to_next = manhattan_distance(state_xy, env.goal)
-
         full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
         
         done = False
@@ -553,7 +581,7 @@ def step_algorithm(req: AlgorithmRequest):
             # MC (từ train_mc.py) dùng 3-tuple
             full_state = (state_xy[0], state_xy[1], visited_code)
         elif algo == "SARSA":
-             # SARSA (từ code gốc) cũng dùng 3-tuple
+                # SARSA (từ code gốc) cũng dùng 3-tuple
             full_state = (state_xy[0], state_xy[1], visited_code)
         else:
             # Q-Learning (từ code gốc) dùng 4-tuple
@@ -642,49 +670,100 @@ def step_algorithm(req: AlgorithmRequest):
             state_xy = next_state
             reward = r
 
-        elif algo == "A2C":
-            if not a2c_model_loaded:
-                raise HTTPException(status_code=400, detail="A2C model not loaded. Please train or load a valid model.")
+        # --- (BẮT ĐẦU KHỐI ĐÃ SỬA LỖI LOGIC CHO PPO VÀ A2C) ---
+        elif algo == "PPO" or algo == "A2C":
+            
+            # 1. Chọn model và kiểm tra
+            if algo == "PPO":
+                if not ppo_model_loaded:
+                    raise HTTPException(status_code=400, detail="PPO model not loaded.")
+                model = ppo_model
+            else: # algo == "A2C"
+                if not a2c_model_loaded:
+                    raise HTTPException(status_code=400, detail="A2C model not loaded.")
+                model = a2c_model
 
+            # 2. Lấy hành động từ model
             target = select_next_target(env)
-            state_tensor = env.build_grid_state().unsqueeze(0)
-            a2c_model.eval()
+            
+            # === SỬA LỖI 3: Chuyển state_tensor sang device ===
+            state_tensor = env.build_grid_state().unsqueeze(0).to(device)
+            
+            # === SỬA LỖI 2: Dùng 'model' thay vì 'a2c_model' ===
+            model.eval() 
             with torch.no_grad():
-                policy_logits, _ = a2c_model(state_tensor)
-                if torch.isnan(policy_logits).any() or torch.isinf(policy_logits).any():
-                    action_idx = random.choice(range(n_actions))
+                policy_logits, _ = model(state_tensor) 
+            # ===================================================
+            
+            if torch.isnan(policy_logits).any() or torch.isinf(policy_logits).any():
+                chosen_action_idx = random.choice(range(n_actions))
+            else:
+                action_probs = F.softmax(policy_logits, dim=-1).squeeze(0)
+                if torch.isnan(action_probs).any() or torch.isinf(action_probs).any() or (action_probs < 0).any():
+                    chosen_action_idx = random.choice(range(n_actions))
                 else:
-                    action_probs = F.softmax(policy_logits, dim=-1).squeeze(0)
-                    if torch.isnan(action_probs).any() or torch.isinf(action_probs).any() or (action_probs < 0).any():
-                        action_idx = random.choice(range(n_actions))
+                    if random.random() < epsilon:
+                        chosen_action_idx = random.choice(range(n_actions))
                     else:
-                        if random.random() < epsilon:
-                            action_idx = random.choice(range(n_actions))
-                        else:
-                            try:
-                                action_idx = torch.multinomial(action_probs, 1).item()
-                            except RuntimeError:
-                                action_idx = random.choice(range(n_actions))
+                        try:
+                            chosen_action_idx = torch.multinomial(action_probs, 1).item()
+                        except RuntimeError:
+                            chosen_action_idx = random.choice(range(n_actions))
 
-            next_state, r, done, _ = env.step(action_idx)
-
-            # A* fallback nếu không tiến gần target hoặc ăn reward xấu
+            # === SỬA LỖI 4: Cấu trúc lại A* fallback ===
+            
+            # 3. Kiểm tra hành động (Simulation)
+            
+            # **SỬA LỖI 4b: Định nghĩa (dx, dy) và (nx, ny) để giả lập**
+            (dx, dy) = env.ACTIONS[chosen_action_idx]
+            nx, ny = state_xy[0] + dx, state_xy[1] + dy
+            
             current_dist = manhattan_distance(state_xy, target)
-            next_dist = manhattan_distance(next_state, target)
-            if r <= env.obstacle_penalty or r == env.wall_penalty or (next_dist >= current_dist and r == env.step_penalty):
-                path_to_target = a_star(env.get_state(), target, env.obstacles, env.width, env.height)
+            
+            # **SỬA LỖI 4c: Tính next_dist dựa trên (nx, ny) giả lập**
+            next_dist = manhattan_distance((nx, ny), target) 
+            
+            is_bad_move = False
+            if nx < 0 or nx >= env.width or ny < 0 or ny >= env.height:
+                is_bad_move = True # Đâm vào tường
+                print(f"{algo} action {chosen_action_idx} leads to wall.")
+            elif (nx, ny) in env.obstacles:
+                is_bad_move = True # Đâm vào vật cản
+                print(f"{algo} action {chosen_action_idx} leads to obstacle.")
+            # Chỉ coi là 'xấu' nếu đi xa hơn VÀ bước đi đó không phải là bước tới target
+            elif (nx, ny) != target and next_dist > current_dist:
+                is_bad_move = True # Đi xa mục tiêu
+                print(f"{algo} action {chosen_action_idx} moves away from target.")
+            
+            # 4. Quyết định thực thi
+            final_action_idx = chosen_action_idx
+            
+            if is_bad_move:
+                # Hành động PPO/A2C bị coi là xấu -> Dùng A* thay thế
+                # Gọi A* từ state HIỆN TẠI (state_xy)
+                path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
+                
                 if len(path_to_target) > 1:
-                    next_pos = path_to_target[1]
-                    dx, dy = next_pos[0] - env.get_state()[0], next_pos[1] - env.get_state()[1]
+                    next_pos = path_to_target[1] # A* khuyến nghị đi đến đây
+                    dx_a, dy_a = next_pos[0] - state_xy[0], next_pos[1] - state_xy[1]
                     try:
-                        action_idx = env.ACTIONS.index((dx, dy))
-                        next_state, r, done, _ = env.step(action_idx)
+                        a_star_action_idx = env.ACTIONS.index((dx_a, dy_a))
+                        final_action_idx = a_star_action_idx # Ghi đè hành động
+                        print(f"A* fallback triggered. Replacing action {chosen_action_idx} with {final_action_idx}.")
                     except ValueError:
-                        pass
+                        print(f"A* fallback failed (invalid move), using {algo}'s original action {chosen_action_idx}.")
+                        pass # Dùng hành động gốc của PPO/A2C
+                else:
+                    print(f"A* fallback failed (no path), using {algo}'s original action {chosen_action_idx}.")
+                    pass # Dùng hành động gốc của PPO/A2C
 
+            # 5. Thực thi hành động (CHỈ 1 LẦN)
+            next_state, r, done, _ = env.step(final_action_idx)
+            
             reward = r
             state_xy = next_state
             epsilon = max(epsilon_min, epsilon * epsilon_decay)
+            # === KẾT THÚC SỬA LỖI 4 ===
 
         return {
             "state": state_xy,
@@ -693,6 +772,7 @@ def step_algorithm(req: AlgorithmRequest):
             "steps": env.steps,
             "visited_waypoints": list(env.visited_waypoints)
         }
+# --- (KẾT THÚC KHỐI SỬA LỖI) ---
 
 @app.post("/run_a_star")
 def run_a_star(req: AStarRequest):
@@ -727,6 +807,7 @@ def run_a_star(req: AStarRequest):
 
 @app.post("/save_qlearning")
 def save_qlearning():
+    # Sửa: Đảm bảo lưu dict(ql_Q)
     with open(QL_QFILE_OFFLINE, 'wb') as f:
         pickle.dump(dict(ql_Q), f)
     return {"status": "Q-learning Q-table saved to offline file"}
@@ -763,6 +844,15 @@ def save_a2c():
         raise HTTPException(status_code=400, detail="A2C model not loaded or trained. Cannot save.")
     torch.save(a2c_model.state_dict(), os.path.join(models_dir, 'a2c_model.pth'))
     return {"status": "A2C model saved"}
+
+# --- (THÊM MỚI 3) ---
+@app.post("/save_ppo")
+def save_ppo():
+    if not ppo_model_loaded:
+        raise HTTPException(status_code=400, detail="PPO model not loaded or trained. Cannot save.")
+    torch.save(ppo_model.state_dict(), os.path.join(models_dir, 'ppo_model.pth'))
+    return {"status": "PPO model saved"}
+# ---------------------
 
 @app.get("/")
 def root():

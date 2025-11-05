@@ -1,3 +1,5 @@
+# app/robot_env.py
+
 from typing import List, Tuple, Optional
 import torch
 import random
@@ -80,9 +82,14 @@ class GridWorldEnv:
                 reward += self.waypoint_reward
                 info["event"] = "waypoint"
 
-            # Phạt đi lại ô cũ
+            # Phạt đi lại ô cũ (chỉ phạt nếu ô đó không phải waypoint)
+            # Sửa lỗi logic phạt revisit: Chỉ phạt nếu ô đã thăm *VÀ* không phải là waypoint *chưa thăm* lần đầu
+            # (Logic cũ có thể phạt cả khi vừa đến waypoint)
+            # => Thực ra logic cũ đã đúng: if self.state in self.visited_waypoints and self.state not in self.waypoints:
+            # => Giữ nguyên logic cũ
             if self.state in self.visited_waypoints and self.state not in self.waypoints:
-                reward += self.revisit_penalty
+                 reward += self.revisit_penalty
+                 # Không đặt info["event"] = "revisit" vì có thể ghi đè "waypoint"
 
         # Check goal
         if self.state == self.goal:
@@ -92,7 +99,7 @@ class GridWorldEnv:
                 info["event"] = "goal"
             else:
                 reward += self.goal_before_waypoints_penalty
-                done = False
+                done = False # Vẫn chưa xong nếu chưa đủ waypoint
                 info["event"] = "goal_before_waypoints"
 
         # Timeout
@@ -101,6 +108,7 @@ class GridWorldEnv:
             done = True
             info["event"] = "timeout"
         
+        # Luôn trả về danh sách visited_waypoints trong info
         info["visited_waypoints"] = list(self.visited_waypoints)
         return self.state, reward, done, info
 
@@ -127,9 +135,13 @@ class GridWorldEnv:
         gx, gy = self.goal
         x, y = self.state
         if 0 <= sx < self.width and 0 <= sy < self.height:
-            grid[sy][sx] = "S"
+            # Chỉ hiển thị 'S' nếu robot không ở ô start
+            if (x, y) != (sx, sy):
+                grid[sy][sx] = "S"
         if 0 <= gx < self.width and 0 <= gy < self.height:
-            grid[gy][gx] = "G"
+            # Chỉ hiển thị 'G' nếu robot không ở ô goal
+            if (x, y) != (gx, gy):
+                grid[gy][gx] = "G"
         if 0 <= x < self.width and 0 <= y < self.height:
             grid[y][x] = "R"
         return "\n".join(" ".join(row) for row in grid)
@@ -142,34 +154,69 @@ class GridWorldEnv:
         done_timeout = self.max_steps is not None and self.steps >= self.max_steps
         return done_goal or done_timeout
 
-    # ----------------- helper for A2C -----------------
-    def build_grid_state(self):
-        """Trả về tensor 5 kênh (robot, goal, obstacles, waypoint chưa thăm, waypoint đã thăm)"""
+    # --- (BẮT ĐẦU SỬA LỖI build_grid_state) ---
+    # Thêm tham số current_target
+    def build_grid_state(self, current_target=None):
+        """Trả về tensor 5 kênh (robot, target, obstacles, waypoint chưa thăm, waypoint đã thăm)"""
+        
+        # Nếu không cung cấp target, mặc định là goal (cho A*)
+        target_pos = current_target if current_target is not None else self.goal
+
         grid = torch.zeros(5, self.height, self.width, dtype=torch.float32)
         rx, ry = self.state
-        gx, gy = self.goal
-        grid[0, ry, rx] = 1.0
-        grid[1, gy, gx] = 1.0
+        # Sửa: Dùng target_pos đã xác định
+        tx, ty = target_pos
+        
+        # Đảm bảo tọa độ nằm trong grid trước khi gán
+        if 0 <= ry < self.height and 0 <= rx < self.width:
+             grid[0, ry, rx] = 1.0 # Kênh 0: Robot
+        if 0 <= ty < self.height and 0 <= tx < self.width:
+             grid[1, ty, tx] = 1.0 # Kênh 1: Mục tiêu HIỆN TẠI (waypoint hoặc goal)
+        
         for ox, oy in self.obstacles:
-            if 0 <= ox < self.width and 0 <= oy < self.height:
-                grid[2, oy, ox] = 1.0
+            if 0 <= oy < self.height and 0 <= ox < self.width:
+                grid[2, oy, ox] = 1.0 # Kênh 2: Obstacles
         for wx, wy in self.waypoints:
-            if (wx, wy) not in self.visited_waypoints:
-                grid[3, wy, wx] = 1.0
-            else:
-                grid[4, wy, wx] = 1.0
+             if 0 <= wy < self.height and 0 <= wx < self.width:
+                if (wx, wy) not in self.visited_waypoints:
+                    grid[3, wy, wx] = 1.0 # Kênh 3: Các waypoint CHƯA thăm
+                else:
+                    grid[4, wy, wx] = 1.0 # Kênh 4: Các waypoint ĐÃ thăm
         return grid
+    # --- (KẾT THÚC SỬA LỖI build_grid_state) ---
     
     def step_to(self, target):
         """Di chuyển trực tiếp robot tới ô target (A* dùng)."""
+        # Cần tính reward và done tương tự step() để A* chạy đúng
+        prev_state = self.state
         self.state = target
         self.steps += 1
-        if target in self.waypoints:
-            self.visited_waypoints.add(target)
-        done = (target == self.goal and set(self.waypoints).issubset(self.visited_waypoints))
-        reward = 1 if target in self.waypoints else 0
+        reward = self.step_penalty # Phạt bước đi cơ bản
+        done = False
         info = {"note": "Auto move by A*"}
-        return target, reward, done, info
+
+        if target in self.waypoints and target not in self.visited_waypoints:
+            self.visited_waypoints.add(target)
+            reward += self.waypoint_reward
+            info["event"] = "waypoint"
+        # Logic phạt revisit không áp dụng cho A* vì A* không quay lại ô cũ trong 1 sub-path
+        # else: # Không cần else ở đây
+        if target == self.goal:
+            if set(self.waypoints).issubset(self.visited_waypoints):
+                reward += self.goal_reward
+                done = True
+                info["event"] = "goal"
+            else:
+                reward += self.goal_before_waypoints_penalty
+                done = False # Chưa xong nếu chưa đủ waypoint
+                info["event"] = "goal_before_waypoints"
+
+        if self.max_steps is not None and self.steps >= self.max_steps and not done:
+            done = True
+            info["event"] = "timeout"
+            
+        info["visited_waypoints"] = list(self.visited_waypoints)
+        return self.state, reward, done, info # Trả về reward, done, info đầy đủ
     
     def randomize_map(self, n_obstacles=5, n_waypoints=2):
         """Ngẫu nhiên hóa vị trí obstacle, waypoint, goal."""
@@ -180,8 +227,16 @@ class GridWorldEnv:
         remaining_cells = [cell for cell in all_cells if cell not in self.obstacles]
 
         if len(remaining_cells) < n_waypoints + 1:
-            raise ValueError("Không đủ ô trống để chọn waypoint và goal.")
+            print(f"Warning: Không đủ ô trống ({len(remaining_cells)}) để chọn {n_waypoints} waypoints và 1 goal. Giảm số lượng.")
+            n_waypoints = max(0, len(remaining_cells) - 1)
+            # raise ValueError("Không đủ ô trống để chọn waypoint và goal.")
 
         self.waypoints = remaining_cells[:n_waypoints]
-        self.goal = remaining_cells[n_waypoints]
-        self.reset()
+        if len(remaining_cells) > n_waypoints:
+            self.goal = remaining_cells[n_waypoints]
+        else:
+            # Trường hợp cực hiếm: không còn ô nào cho goal -> đặt goal trùng start (không lý tưởng)
+            print("Warning: Không còn ô trống cho goal, đặt trùng start.")
+            self.goal = self.start
+            
+        self.reset() # Reset lại trạng thái sau khi random map
