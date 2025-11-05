@@ -20,7 +20,7 @@ from app.robot_env import GridWorldEnv
 
 # ---------------------- Hyperparameters ----------------------
 GAMMA = 0.99
-NUM_EPISODES = 20000
+NUM_EPISODES = 10000
 MAX_STEPS_PER_EPISODE = 500
 
 # (Các hằng số khác như EVAL_INTERVAL, PRINT_INTERVAL, v.v. giữ nguyên)
@@ -298,9 +298,6 @@ for episode in range(1, NUM_EPISODES + 1):
         avg_recent = float(np.mean(total_rewards[-PRINT_INTERVAL:])) if len(total_rewards) >= PRINT_INTERVAL else float(np.mean(total_rewards))
         print(f"Episode {episode}/{NUM_EPISODES}  recent_avg={avg_recent:.2f}")
 
-<<<<<<< Updated upstream
-print(f"Huấn luyện hoàn tất. Q-table được lưu tại: {MC_QFILE}")
-=======
     # ... (Phần 'Evaluation' và 'Save' giữ nguyên) ...
     if episode % EVAL_INTERVAL == 0:
         # Đã sửa: Truyền mc_Policy vào hàm đánh giá
@@ -330,4 +327,3 @@ print("MC-ES training finished (EXPLICIT version). Models saved.")
 # Đã sửa: Truyền mc_Policy vào hàm render
 print("\nPolicy (greedy) arrows for visited_code=0:")
 print(render_policy_as_arrows(mc_Policy))
->>>>>>> Stashed changes
