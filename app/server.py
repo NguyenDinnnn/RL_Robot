@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from typing import List, Tuple, Optional
@@ -24,16 +24,18 @@ app.mount("/web", StaticFiles(directory=os.path.join(os.path.dirname(__file__), 
 # Environment
 # ---------------------------
 width, height = 10, 8
-start = (0,0)
-goal = (9,7)
-waypoints = [(3,2),(6,5)]
-obstacles = [(1,1),(2,3),(4,4),(5,1),(7,6)]
+start = (0, 0)
+goal = (9, 7)
+waypoints = [(3, 2), (6, 5)]
+obstacles = [(1, 1), (2, 3), (4, 4), (5, 1), (7, 6)]
 env = GridWorldEnv(width, height, start, goal, obstacles, waypoints, max_steps=100)
-env.step_penalty = -2.0
-env.revisit_penalty = -3.0
-env.waypoint_reward = 30.0
-env.goal_reward = 100.0
-env.goal_before_waypoints_penalty = -10.0
+env.step_penalty = -0.5  # Sync with train_a2c.py
+env.wall_penalty = -2.0
+env.obstacle_penalty = -5.0
+env.revisit_penalty = -1.0
+env.waypoint_reward = 20.0
+env.goal_reward = 50.0
+env.goal_before_waypoints_penalty = -5.0
 
 # ---------------------------
 # Models dir
@@ -112,20 +114,19 @@ if os.path.exists(mc_returns_file):
         print(f"❌ Lỗi khi tải Returns MC: {e}")
 else:
     print(f"⚠️ File Returns MC {mc_returns_file} không tồn tại (cần cho huấn luyện online).")
+
 # ---------------------------
 # Load Q-learning
 # ---------------------------
 QL_QFILE_OFFLINE = os.path.join(models_dir, "qlearning_qtable_offline.pkl")
 ql_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
-
 if os.path.exists(QL_QFILE_OFFLINE):
     with open(QL_QFILE_OFFLINE, "rb") as f:
         loaded_ql_Q = pickle.load(f)
     ql_Q.update(loaded_ql_Q)
     print(f"✅ Đã tải Q-table Q-Learning từ file OFFLINE: {QL_QFILE_OFFLINE}")
 else:
-    print(f"⚠️ KHÔNG tìm thấy file Q-table OFFLINE: {QL_QFILE_OFFLINE}. Bắt đầu với Q-table rỗng.")
-
+    print(f"⚠️ File Q-table Q-Learning {QL_QFILE_OFFLINE} không tồn tại. Hãy huấn luyện trước.")
 # ---------------------------
 # Load SARSA
 # ---------------------------
@@ -135,25 +136,33 @@ if os.path.exists(sarsa_qfile):
         loaded_sarsa_Q = pickle.load(f)
     sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
     sarsa_Q.update(loaded_sarsa_Q)
+    print(f"✅ Đã tải Q-table SARSA, tổng số state đã biết = {len(sarsa_Q)}")
 else:
     sarsa_Q = defaultdict(lambda: {a: 0.0 for a in ['up', 'right', 'down', 'left']})
+    print("🆕 Không tìm thấy Q-table SARSA, tạo mới.")
 
 # ---------------------------
 # Load A2C
 # ---------------------------
-a2c_model_file = os.path.join(models_dir, "a2c_model.pth")
-in_channels = 5
-height, width = env.height, env.width
-n_actions = len(env.ACTIONS)
-a2c_model = ActorCritic(in_channels, height, width, n_actions)
-if os.path.exists(a2c_model_file):
-    try:
-        a2c_model.load_state_dict(torch.load(a2c_model_file))
-        a2c_model.eval()
-        print("✅ A2C model loaded successfully")
-    except RuntimeError:
-        print("⚠️ Không load được A2C checkpoint. Sẽ dùng model mới.")
+a2c_model_file = os.path.join(models_dir, "a2c_model.pth") # Định nghĩa đường dẫn file checkpoint mô hình A2C.
+in_channels = 5 # Số lượng kênh đầu vào (ví dụ: các lớp bản đồ trạng thái trong GridWorld).
+height, width = env.height, env.width # Kích thước lưới môi trường.
+n_actions = len(env.ACTIONS) # Số lượng hành động có thể có (ví dụ: 4: lên, xuống, trái, phải).
+a2c_model = ActorCritic(in_channels, height, width, n_actions) # Khởi tạo kiến trúc mạng ActorCritic.
+a2c_model_loaded = False # Cờ (flag) để theo dõi trạng thái tải mô hình.
 
+if os.path.exists(a2c_model_file): # Kiểm tra xem file mô hình đã lưu có tồn tại không.
+    try:
+        a2c_model.load_state_dict(torch.load(a2c_model_file)) # Tải các tham số (trọng số) đã lưu vào mô hình đã khởi tạo.
+        a2c_model.eval() # Đặt mô hình vào chế độ đánh giá (evaluation mode), tắt dropout/batchnorm (nếu có).
+        a2c_model_loaded = True # Đặt cờ thành True.
+        print("✅ A2C model loaded successfully") # Thông báo tải thành công.
+    except RuntimeError as e:
+        # Xử lý lỗi nếu cấu trúc mô hình không khớp với file đã lưu.
+        print(f"⚠️ Không load được A2C checkpoint: {str(e)}. Sẽ dùng model mới.")
+else:
+    # Thông báo nếu không tìm thấy file mô hình đã huấn luyện.
+    print(f"⚠️ File A2C model {a2c_model_file} không tồn tại. Hãy huấn luyện trước bằng train_a2c.py.")
 # ---------------------------
 # RL params
 # ---------------------------
@@ -167,23 +176,23 @@ epsilon_decay = 0.995
 # Request Models
 # ---------------------------
 class ResetRequest(BaseModel):
-    width: Optional[int]=None
-    height: Optional[int]=None
-    start: Optional[Tuple[int,int]]=None
-    goal: Optional[Tuple[int,int]]=None
-    waypoints: Optional[List[Tuple[int,int]]]=None
-    obstacles: Optional[List[Tuple[int,int]]]=None
-    max_steps: Optional[int]=None
+    width: Optional[int] = None
+    height: Optional[int] = None
+    start: Optional[Tuple[int, int]] = None
+    goal: Optional[Tuple[int, int]] = None
+    waypoints: Optional[List[Tuple[int, int]]] = None
+    obstacles: Optional[List[Tuple[int, int]]] = None
+    max_steps: Optional[int] = None
 
 class ActionInput(BaseModel):
-    action: Optional[int]=None
-    action_name: Optional[str]=None
+    action: Optional[int] = None
+    action_name: Optional[str] = None
 
 class AlgorithmRequest(BaseModel):
     algorithm: str
 
 class AStarRequest(BaseModel):
-    goal: Optional[Tuple[int,int]] = None
+    goal: Optional[Tuple[int, int]] = None
 
 def encode_visited(wp_list, visited_set):
     code = 0
@@ -195,12 +204,19 @@ def encode_visited(wp_list, visited_set):
 def manhattan_distance(pos1: Tuple[int, int], pos2: Tuple[int, int]) -> int:
     return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
 
+def select_next_target(env):
+    unvisited_waypoints = set(env.waypoints) - env.visited_waypoints
+    if unvisited_waypoints:
+        return min(unvisited_waypoints, key=lambda wp: manhattan_distance(env.get_state(), wp))
+    else:
+        return env.goal
+
 # ---------------------------
 # A* functions
 # ---------------------------
 def a_star(start, goal, obstacles, width, height):
     open_set = []
-    heapq.heappush(open_set, (0+manhattan_distance(start, goal), 0, start, [start]))
+    heapq.heappush(open_set, (0 + abs(start[0] - goal[0]) + abs(start[1] - goal[1]), 0, start, [start]))
     visited = set()
     while open_set:
         f, g, current, path = heapq.heappop(open_set)
@@ -210,10 +226,10 @@ def a_star(start, goal, obstacles, width, height):
             continue
         visited.add(current)
         x, y = current
-        for dx, dy in [(0,-1),(1,0),(0,1),(-1,0)]:
-            nx, ny = x+dx, y+dy
-            if 0<=nx<width and 0<=ny<height and (nx,ny) not in obstacles:
-                heapq.heappush(open_set, (g+1+manhattan_distance((nx,ny), goal), g+1, (nx,ny), path+[(nx,ny)]))
+        for dx, dy in [(0, -1), (1, 0), (0, 1), (-1, 0)]:
+            nx, ny = x + dx, y + dy
+            if 0 <= nx < width and 0 <= ny < height and (nx, ny) not in obstacles:
+                heapq.heappush(open_set, (g + 1 + abs(nx - goal[0]) + abs(ny - goal[1]), g + 1, (nx, ny), path + [(nx, ny)]))
     return []
 
 def plan_path_through_waypoints(start, waypoints, goal, obstacles, width, height):
@@ -245,10 +261,9 @@ def plan_path_through_waypoints(start, waypoints, goal, obstacles, width, height
 # Extend GridWorldEnv for A* step
 # ---------------------------
 def step_to_rl(self, target):
-    prev_state = self.state
     self.state = target
     self.steps += 1
-    reward = self.step_penalty
+    reward = -0.1  # Đồng bộ với A* reward trong server
     done = False
     info = {"note": "Auto move by A* (RL reward)"}
     if target in self.waypoints and target not in self.visited_waypoints:
@@ -265,7 +280,6 @@ def step_to_rl(self, target):
             info["event"] = "goal"
         else:
             reward += self.goal_before_waypoints_penalty
-            done = False
             info["event"] = "goal_before_waypoints"
     if self.max_steps is not None and self.steps >= self.max_steps and not done:
         done = True
@@ -294,11 +308,13 @@ def reset(req: ResetRequest):
         ob = req.obstacles if req.obstacles is not None else list(env.obstacles)
         ms = req.max_steps if req.max_steps is not None else 100
         env = GridWorldEnv(w, h, s, g, ob, wp, max_steps=ms)
-        env.step_penalty = -2.0
-        env.revisit_penalty = -3.0
-        env.waypoint_reward = 30.0
-        env.goal_reward = 100.0
-        env.goal_before_waypoints_penalty = -10.0
+        env.step_penalty = -0.5
+        env.wall_penalty = -2.0
+        env.obstacle_penalty = -5.0
+        env.revisit_penalty = -1.0
+        env.waypoint_reward = 20.0
+        env.goal_reward = 50.0
+        env.goal_before_waypoints_penalty = -5.0
         state = env.reset(max_steps=ms)
         return {"state": state, "map": env.get_map(), "ascii": env.render_ascii()}
 
@@ -315,11 +331,13 @@ def reset_all():
         waypoints = remain[:2]
         goal = remain[2]
         env = GridWorldEnv(w, h, start, goal, obstacles, waypoints, max_steps=100)
-        env.step_penalty = -2.0
-        env.revisit_penalty = -3.0
-        env.waypoint_reward = 30.0
-        env.goal_reward = 100.0
-        env.goal_before_waypoints_penalty = -10.0
+        env.step_penalty = -0.5
+        env.wall_penalty = -2.0
+        env.obstacle_penalty = -5.0
+        env.revisit_penalty = -1.0
+        env.waypoint_reward = 20.0
+        env.goal_reward = 50.0
+        env.goal_before_waypoints_penalty = -5.0
         state = env.reset(max_steps=100)
         return {
             "state": state,
@@ -346,9 +364,9 @@ def step(inp: ActionInput):
     with _env_lock:
         try:
             if inp.action_name is not None:
-                s,r,done,info = env.step_by_name(inp.action_name)
+                s, r, done, info = env.step_by_name(inp.action_name)
             elif inp.action is not None:
-                s,r,done,info = env.step(inp.action)
+                s, r, done, info = env.step(inp.action)
             else:
                 return {"error": "No action provided"}
             return {
@@ -374,43 +392,52 @@ def run_qlearning_greedy():
         scheduled_idx = 0
         state_xy = start_xy
         visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-        dist_to_next = min([manhattan_distance(state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                           [manhattan_distance(state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
+
+        # dist_to_next theo các waypoint chưa thăm → nếu hết thì đến goal
+        unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+        if unvisited_wps:
+            dist_to_next = min([manhattan_distance(state_xy, wp) for wp in unvisited_wps])
+        else:
+            dist_to_next = manhattan_distance(state_xy, env.goal)
+
         full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
         done = False
         total_reward = 0
         steps = 0
         rewards_over_time = []
         path = [start_xy]
-        while not done and steps < env.max_steps and scheduled_idx < len(schedule):
-            target = schedule[scheduled_idx]
+
+        # Vòng lặp theo done/steps
+        while not done and steps < env.max_steps:
+            target = schedule[scheduled_idx] if scheduled_idx < len(schedule) else env.goal
+
             if full_state in ql_Q and any(ql_Q[full_state].values()):
                 max_q = max(ql_Q[full_state].values())
                 best_actions = [a for a, q in ql_Q[full_state].items() if q == max_q]
                 action_name = random.choice(best_actions)
             else:
-                # Fallback to A* if state not in Q-table
-                path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
-                if len(path_to_target) > 1:
-                    next_pos = path_to_target[1]
-                    dx, dy = next_pos[0] - state_xy[0], next_pos[1] - state_xy[1]
-                    action_idx = env.ACTIONS.index((dx, dy))
-                    action_name = actions[action_idx]
-                else:
-                    action_name = random.choice(actions)
+                action_name = random.choice(actions)  # fallback
+
             action_idx = actions.index(action_name)
             next_state_xy, reward, done_env, _ = env.step(action_idx)
-            if next_state_xy == target:
-                scheduled_idx += 1 
+
+            if next_state_xy == target and scheduled_idx < len(schedule) - 1:
+                scheduled_idx += 1
+
             visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                               [manhattan_distance(next_state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
+            unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+            if unvisited_wps:
+                dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in unvisited_wps])
+            else:
+                dist_to_next = manhattan_distance(next_state_xy, env.goal)
+
             full_state = (next_state_xy[0], next_state_xy[1], visited_code, dist_to_next)
             done = done_env 
             total_reward += reward
             rewards_over_time.append(total_reward)
             steps += 1
             path.append(next_state_xy)
+
         elapsed_time = time.time() - start_time
         return {
             "algorithm": "Q-Learning (Offline/Greedy, Waypoint Scheduling)",
@@ -434,31 +461,15 @@ def run_mc_greedy():
         env.visited_waypoints = set()
         state_xy = start_xy
         visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-<<<<<<< Updated upstream
-        dist_to_next = min([manhattan_distance(state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                           [manhattan_distance(state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
-        full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
-=======
 
-        
+        # SỬA LỖI: MC dùng state 3-tuple
         full_state = (state_xy[0], state_xy[1], visited_code)
         
->>>>>>> Stashed changes
         done = False
         total_reward = 0
         steps = 0
         rewards_over_time = []
         path = [start_xy]
-<<<<<<< Updated upstream
-        while not done and steps < env.max_steps and scheduled_idx < len(schedule):
-            target = schedule[scheduled_idx]
-            if full_state in mc_Q and any(mc_Q[full_state].values()):
-                max_q = max(mc_Q[full_state].values())
-                best_actions = [a for a, q in mc_Q[full_state].items() if q == max_q]
-                action_name = random.choice(best_actions)
-            else:
-                # Fallback to A* if state not in Q-table
-=======
 
         while not done and (env.max_steps is None or steps < env.max_steps):
             
@@ -467,13 +478,12 @@ def run_mc_greedy():
                 action_name = mc_policy[full_state]
             elif full_state in mc_Q and any(mc_Q[full_state].values()):
                 try:
-                    action_name = max(mc_Q[full_state], key=mc_Q[full_state].get)
+                    action_name = max(mc_Q[full_state], key=lambda a: mc_Q[full_state].get(a, 0.0))
                 except Exception:
                     action_name = random.choice(actions)
             else:
                 # Fallback: Nếu state chưa từng thấy, dùng A* tạm thời
                 target = select_next_target(env) # Tìm mục tiêu gần nhất
->>>>>>> Stashed changes
                 path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
                 if len(path_to_target) > 1:
                     next_pos = path_to_target[1]
@@ -485,39 +495,27 @@ def run_mc_greedy():
                         action_name = random.choice(actions)
                 else:
                     action_name = random.choice(actions)
+
             action_idx = actions.index(action_name)
             next_state_xy, reward, done_env, _ = env.step(action_idx)
-<<<<<<< Updated upstream
-            if next_state_xy == target:
-                scheduled_idx += 1 
-            visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                               [manhattan_distance(next_state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
-            full_state = (next_state_xy[0], next_state_xy[1], visited_code, dist_to_next)
-            done = done_env 
-=======
 
             visited_code = encode_visited(env.waypoints, env.visited_waypoints)
             
-            # *** ĐÃ SỬA: Bỏ 'dist_to_next' ***
+            # SỬA LỖI: MC dùng state 3-tuple
             full_state = (next_state_xy[0], next_state_xy[1], visited_code)
             
             done = done_env
->>>>>>> Stashed changes
             total_reward += reward
             rewards_over_time.append(total_reward)
             steps += 1
             path.append(next_state_xy)
-<<<<<<< Updated upstream
-=======
             
             # Cập nhật state_xy cho A* fallback (nếu cần)
             state_xy = next_state_xy 
 
->>>>>>> Stashed changes
         elapsed_time = time.time() - start_time
         return {
-            "algorithm": "MC (Offline/Greedy)", # Đã sửa tên
+            "algorithm": "MC (Offline/Greedy)",
             "path": path,
             "state": env.get_state(),
             "reward": total_reward,
@@ -528,13 +526,9 @@ def run_mc_greedy():
             "elapsed_time": elapsed_time,
             "rewards_over_time": rewards_over_time
         }
+        
 @app.post("/step_algorithm")
 def step_algorithm(req: AlgorithmRequest):
-<<<<<<< Updated upstream
-    global epsilon, mc_Q
-    algo = req.algorithm
-    with _env_lock:
-=======
     global epsilon, trajectory, mc_Q, mc_Returns, mc_policy
     algo = req.algorithm
     with _env_lock:
@@ -542,48 +536,37 @@ def step_algorithm(req: AlgorithmRequest):
         if globals().get("trajectory", None) is None:
             trajectory = []
 
->>>>>>> Stashed changes
         state_xy = env.get_state()
-        done = False
         reward = 0
-        trajectory = []  # Lưu trajectory cho MC
         visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-        dist_to_next = min([manhattan_distance(state_xy, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                           [manhattan_distance(state_xy, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
+
+        unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
+        if unvisited_wps:
+            dist_to_next = min([manhattan_distance(state_xy, wp) for wp in unvisited_wps])
+        else:
+            dist_to_next = manhattan_distance(state_xy, env.goal)
+
         full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
+        
+        done = False
+
         if algo == "MC":
-<<<<<<< Updated upstream
-            if np.random.rand() > epsilon:
-                if full_state in mc_Q and any(mc_Q[full_state].values()):
-                    action_name = max(mc_Q[full_state], key=mc_Q[full_state].get)
-                else:
-                    # Fallback to A* if state not in Q-table
-                    target = env.waypoints[0] if env.waypoints and env.visited_waypoints != set(env.waypoints) else env.goal
-                    path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
-                    if len(path_to_target) > 1:
-                        next_pos = path_to_target[1]
-                        dx, dy = next_pos[0] - state_xy[0], next_pos[1] - state_xy[1]
-                        action_idx = env.ACTIONS.index((dx, dy))
-                        action_name = actions[action_idx]
-                    else:
-                        action_name = np.random.choice(actions)
-            else:
-                action_name = np.random.choice(actions)
-=======
-            # Khi chạy MC, state CHỈ CÓ 3 phần
+            # MC (từ train_mc.py) dùng 3-tuple
+            full_state = (state_xy[0], state_xy[1], visited_code)
+        elif algo == "SARSA":
+             # SARSA (từ code gốc) cũng dùng 3-tuple
             full_state = (state_xy[0], state_xy[1], visited_code)
         else:
-           
+            # Q-Learning (từ code gốc) dùng 4-tuple
             unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
             if unvisited_wps:
                 dist_to_next = min([manhattan_distance(state_xy, wp) for wp in unvisited_wps])
             else:
                 dist_to_next = manhattan_distance(state_xy, env.goal)
             
-            
             full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
-            done = False
-            
+        done = False
+        
         if algo == "MC":
             # 1. Chọn hành động từ policy
             # (Giống hệt logic "following pi" của train_mc_es_explicit.py)
@@ -592,35 +575,12 @@ def step_algorithm(req: AlgorithmRequest):
                 mc_policy[full_state] = random.choice(actions)
                 
             action_name = mc_policy[full_state]
->>>>>>> Stashed changes
             action_idx = actions.index(action_name)
             
             # 2. Thực hiện hành động
             next_state, r, done, _ = env.step(action_idx)
-<<<<<<< Updated upstream
-            next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            next_dist_to_next = min([manhattan_distance(next_state, wp) for wp in env.waypoints if wp not in env.visited_waypoints] + 
-                                    [manhattan_distance(next_state, env.goal)] if len(env.visited_waypoints) == len(env.waypoints) else [float('inf')])
-            next_state_tuple = (next_state[0], next_state[1], next_visited_code, next_dist_to_next)
-            trajectory.append((full_state, action_name, r))
-            reward = r
-            state_xy = next_state
-            if done or env.steps >= env.max_steps:
-                G = 0
-                visited_state_actions = set()
-                for state, action, r in reversed(trajectory):
-                    G = r + gamma * G
-                    state_action = (state, action)
-                    if state_action not in visited_state_actions:
-                        visited_state_actions.add(state_action)
-                        old_q = mc_Q[state][action]
-                        mc_Q[state][action] += alpha * (G - old_q)
-                trajectory = []
-            epsilon = max(epsilon_min, epsilon * epsilon_decay)
-=======
 
             # 3. Ghi nhận vào trajectory
-            # (Lưu ý: PBRS (shaping) không được dùng ở đây để giữ logic đơn giản)
             trajectory.append((full_state, action_name, r))
 
             reward = r
@@ -647,11 +607,9 @@ def step_algorithm(req: AlgorithmRequest):
                         mc_Returns[state_action_update].append(G)
 
                         # Dòng 2: Q(St, At) <- Average(Returns(St, At))
-                        # ensure we store a native Python float (not a numpy scalar) to satisfy type checkers
                         mc_Q[state_update][action_update] = float(np.mean(mc_Returns[state_action_update]))
 
                         # Dòng 3: pi(St) <- argmax_a Q(St, a)
-                        # use items() and a lambda to avoid overload/type issues with dict.get
                         qvals = mc_Q[state_update]
                         best_action_update = max(qvals.items(), key=lambda kv: kv[1])[0]
                         mc_policy[state_update] = best_action_update
@@ -659,48 +617,76 @@ def step_algorithm(req: AlgorithmRequest):
                 print(f"MC online episode finished. Updated {len(visited_state_actions)} pairs (Literal Average).")
                 trajectory = [] # Reset trajectory cho hồi mới
 
->>>>>>> Stashed changes
         elif algo == "Q-learning":
+            # Greedy theo Q-table đã huấn luyện, KHÔNG train online
             if full_state in ql_Q and any(ql_Q[full_state].values()):
                 action_name = max(ql_Q[full_state], key=ql_Q[full_state].get)
             else:
                 action_name = np.random.choice(actions)
+
             action_idx = actions.index(action_name)
             next_state, r, done, _ = env.step(action_idx)
-            state_xy = next_state
             reward = r
+            state_xy = next_state
+            # (không trajectory/không update ql_Q)
+
         elif algo == "SARSA":
-            if np.random.rand() < epsilon:
-                action_name = np.random.choice(actions)
+            sarsa_state = (state_xy[0], state_xy[1], visited_code)
+            if sarsa_state in sarsa_Q and any(sarsa_Q[sarsa_state].values()):
+                max_q = max(sarsa_Q[sarsa_state].values())
+                best_actions = [a for a, q in sarsa_Q[sarsa_state].items() if q == max_q]
+                action_name = random.choice(best_actions)
             else:
-                if full_state in sarsa_Q and any(sarsa_Q[full_state].values()):
-                    action_name = max(sarsa_Q[full_state], key=sarsa_Q[full_state].get)
-                else:
-                    action_name = np.random.choice(actions)
+                action_name = np.random.choice(actions)
             action_idx = actions.index(action_name)
             next_state, r, done, _ = env.step(action_idx)
-            next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-            next_state_tuple = (next_state[0], next_state[1], next_visited_code)
-            if next_state_tuple in sarsa_Q and any(sarsa_Q[next_state_tuple].values()):
-                next_action_name = max(sarsa_Q[next_state_tuple], key=sarsa_Q[next_state_tuple].get)
-            else:
-                next_action_name = np.random.choice(actions)
-            sarsa_Q[full_state][action_name] += alpha * (
-                r + gamma * sarsa_Q[next_state_tuple][next_action_name] - sarsa_Q[full_state][action_name]
-            )
             state_xy = next_state
             reward = r
-            epsilon = max(epsilon_min, epsilon * 0.995)
+
         elif algo == "A2C":
+            if not a2c_model_loaded:
+                raise HTTPException(status_code=400, detail="A2C model not loaded. Please train or load a valid model.")
+
+            target = select_next_target(env)
             state_tensor = env.build_grid_state().unsqueeze(0)
             a2c_model.eval()
             with torch.no_grad():
                 policy_logits, _ = a2c_model(state_tensor)
-                action_probs = F.softmax(policy_logits, dim=-1).squeeze(0)
-                action_idx = torch.multinomial(action_probs, 1).item()
+                if torch.isnan(policy_logits).any() or torch.isinf(policy_logits).any():
+                    action_idx = random.choice(range(n_actions))
+                else:
+                    action_probs = F.softmax(policy_logits, dim=-1).squeeze(0)
+                    if torch.isnan(action_probs).any() or torch.isinf(action_probs).any() or (action_probs < 0).any():
+                        action_idx = random.choice(range(n_actions))
+                    else:
+                        if random.random() < epsilon:
+                            action_idx = random.choice(range(n_actions))
+                        else:
+                            try:
+                                action_idx = torch.multinomial(action_probs, 1).item()
+                            except RuntimeError:
+                                action_idx = random.choice(range(n_actions))
+
             next_state, r, done, _ = env.step(action_idx)
-            state_xy = next_state
+
+            # A* fallback nếu không tiến gần target hoặc ăn reward xấu
+            current_dist = manhattan_distance(state_xy, target)
+            next_dist = manhattan_distance(next_state, target)
+            if r <= env.obstacle_penalty or r == env.wall_penalty or (next_dist >= current_dist and r == env.step_penalty):
+                path_to_target = a_star(env.get_state(), target, env.obstacles, env.width, env.height)
+                if len(path_to_target) > 1:
+                    next_pos = path_to_target[1]
+                    dx, dy = next_pos[0] - env.get_state()[0], next_pos[1] - env.get_state()[1]
+                    try:
+                        action_idx = env.ACTIONS.index((dx, dy))
+                        next_state, r, done, _ = env.step(action_idx)
+                    except ValueError:
+                        pass
+
             reward = r
+            state_xy = next_state
+            epsilon = max(epsilon_min, epsilon * epsilon_decay)
+
         return {
             "state": state_xy,
             "reward": reward,
@@ -715,8 +701,7 @@ def run_a_star(req: AStarRequest):
         start_time = time.time()
         rewards_over_time = []
         start = env.get_state()
-        path = plan_path_through_waypoints(start, env.waypoints, req.goal or env.goal,
-                                         env.obstacles, env.width, env.height)
+        path = plan_path_through_waypoints(start, env.waypoints, req.goal or env.goal, env.obstacles, env.width, env.height)
         if not path:
             return {"error": "Không tìm thấy đường đi qua tất cả waypoint"}
         env.reset()
@@ -744,16 +729,11 @@ def run_a_star(req: AStarRequest):
 @app.post("/save_qlearning")
 def save_qlearning():
     with open(QL_QFILE_OFFLINE, 'wb') as f:
-        pickle.dump(ql_Q, f)
+        pickle.dump(dict(ql_Q), f)
     return {"status": "Q-learning Q-table saved to offline file"}
 
 @app.post("/save_mc")
 def save_mc():
-<<<<<<< Updated upstream
-    with open(os.path.join(models_dir, 'mc_qtable.pkl'), 'wb') as f:
-        pickle.dump(mc_Q, f)
-    return {"status": "MC Q-table saved"}
-=======
     global mc_Q, mc_Returns, mc_policy
     try:
         mc_q_path = os.path.join(models_dir, 'mc_qtable.pkl')
@@ -771,16 +751,17 @@ def save_mc():
         return {"status": f"MC Q-table, Returns, và Policy saved to {models_dir}"}
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Error saving MC models: {str(e)}")
->>>>>>> Stashed changes
 
 @app.post("/save_sarsa")
 def save_sarsa():
     with open(os.path.join(models_dir, 'sarsa_qtable.pkl'), 'wb') as f:
-        pickle.dump(sarsa_Q, f)
+        pickle.dump(dict(sarsa_Q), f)
     return {"status": "SARSA Q-table saved"}
 
 @app.post("/save_a2c")
 def save_a2c():
+    if not a2c_model_loaded:
+        raise HTTPException(status_code=400, detail="A2C model not loaded or trained. Cannot save.")
     torch.save(a2c_model.state_dict(), os.path.join(models_dir, 'a2c_model.pth'))
     return {"status": "A2C model saved"}
 
