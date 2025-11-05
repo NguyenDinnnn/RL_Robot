@@ -432,7 +432,7 @@ def run_qlearning_greedy():
                 dist_to_next = manhattan_distance(next_state_xy, env.goal)
 
             full_state = (next_state_xy[0], next_state_xy[1], visited_code, dist_to_next)
-            done = done_env 
+            done = done_env
             total_reward += reward
             rewards_over_time.append(total_reward)
             steps += 1
@@ -503,7 +503,6 @@ def run_mc_greedy():
             
             # SỬA LỖI: MC dùng state 3-tuple
             full_state = (next_state_xy[0], next_state_xy[1], visited_code)
-            
             done = done_env
             total_reward += reward
             rewards_over_time.append(total_reward)

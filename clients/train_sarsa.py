@@ -15,15 +15,25 @@ start = (0,0)
 goal = (9,7)
 waypoints = [(3,2),(6,5)]
 obstacles = [(1,1),(2,3),(4,4),(5,1),(7,6)]
+# CẬP NHẬT: Tăng max_steps để robot có đủ thời gian khám phá
 env = GridWorldEnv(width=10, height=8, start=start, goal=goal, obstacles=obstacles, waypoints=waypoints, max_steps=500)
+
+# CẬP NHẬT: Đồng bộ hóa các tham số thưởng/phạt với file server.py
+# Điều này RẤT QUAN TRỌNG để robot học đúng hành vi
+env.step_penalty = -2.0
+env.revisit_penalty = -3.0
+env.waypoint_reward = 30.0
+env.goal_reward = 100.0
+env.goal_before_waypoints_penalty = -10.0
+
 
 actions = ['up', 'right', 'down', 'left']
 gamma = 0.99      # Hệ số chiết khấu
 alpha = 0.1       # Tỷ lệ học
 epsilon = 1.0     # Tỷ lệ khám phá ban đầu
-epsilon_decay = 0.9995 # Tỷ lệ giảm epsilon
+epsilon_decay = 0.9997 # Điều chỉnh decay rate cho phù hợp với số episodes mới
 min_epsilon = 0.05    # Epsilon tối thiểu
-episodes = 10000  # Tăng số lượng episodes để học tốt hơn
+episodes = 20000  # CẬP NHẬT: Tăng số lượng episodes để học tốt hơn
 
 # ---------------------------
 # Chuẩn bị Q-table và đường dẫn
@@ -67,10 +77,11 @@ def choose_action(state, current_epsilon):
     return random.choice(best_actions)
 
 print(f"🚀 Bắt đầu huấn luyện SARSA với {episodes} episodes...")
-
+total_rewards = []
 for ep in range(episodes):
     env.reset()
     done = False
+    episode_reward = 0
     
     # Lấy trạng thái và hành động ban đầu
     state_xy = env.get_state()
@@ -83,6 +94,7 @@ for ep in range(episodes):
         # Thực hiện hành động
         action_idx = actions.index(action)
         next_state_xy, reward, done, _ = env.step(action_idx)
+        episode_reward += reward
         
         # Lấy trạng thái và hành động tiếp theo
         next_visited_code = encode_visited(env.waypoints, env.visited_waypoints)
@@ -99,9 +111,12 @@ for ep in range(episodes):
 
     # Giảm epsilon sau mỗi episode
     epsilon = max(min_epsilon, epsilon * epsilon_decay)
+    total_rewards.append(episode_reward)
     
+    # CẬP NHẬT: In ra tiến trình học tập
     if (ep + 1) % 100 == 0:
-        print(f"-> Episode {ep + 1}/{episodes} | Epsilon: {epsilon:.4f}")
+        avg_reward = np.mean(total_rewards[-100:])
+        print(f"-> Episode {ep + 1}/{episodes} | Epsilon: {epsilon:.4f} | Avg Reward (last 100): {avg_reward:.2f}")
 
 # ---------------------------
 # Lưu kết quả

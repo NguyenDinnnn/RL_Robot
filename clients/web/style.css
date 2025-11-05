@@ -16,10 +16,22 @@ body {
 .main-container {
     max-width: 1400px;
     margin: 0 auto;
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    grid-gap: 20px;
-    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    gap: 20px;
+    padding: 20px; /* Thống nhất với style.css */
+}
+
+/* Row layout */
+.row {
+    display: flex;
+    gap: 20px;
+    align-items: flex-start; /* Lấy từ index.html <style> */
+}
+
+.row .card {
+    flex: 1;
+    min-width: 0;
 }
 
 /* Cột trái - Môi trường mô phỏng */
@@ -122,7 +134,8 @@ body {
     background: linear-gradient(135deg, #4CAF50, #45a049);
     color: white;
     box-shadow: 0 2px 8px rgba(76, 175, 80, 0.4);
-    font-size: 18px; /* Tăng kích thước icon robot */
+    font-size: 18px;
+    animation: robotMove 0.5s ease-in-out;
 }
 
 .goal {
@@ -446,8 +459,8 @@ body {
 /* Responsive design */
 @media (max-width: 1200px) {
     .main-container {
-        grid-template-columns: 1fr;
-        grid-template-rows: auto auto;
+        flex-direction: column; /* Thay đổi từ grid sang flex cho thống nhất */
+        gap: 15px;
     }
     
     .combined-content {
@@ -458,7 +471,6 @@ body {
 
 @media (max-width: 768px) {
     .main-container {
-        grid-template-columns: 1fr;
         gap: 15px;
         padding: 10px;
     }
@@ -489,10 +501,6 @@ body {
     100% { transform: scale(1); }
 }
 
-.robot {
-    animation: robotMove 0.5s ease-in-out;
-}
-
 /* Hiệu ứng loading */
 .loading {
     display: inline-block;
@@ -507,20 +515,4 @@ body {
 @keyframes spin {
     0% { transform: rotate(0deg); }
     100% { transform: rotate(360deg); }
-}
-
-.main-container {
-  display: flex;
-  flex-direction: column;
-  gap: 20px;
-  padding: 20px;
-}
-
-.row {
-  display: flex;
-  gap: 20px;
-}
-
-.row .card {
-  flex: 1;
 }
