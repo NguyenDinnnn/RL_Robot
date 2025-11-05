@@ -580,19 +580,50 @@ def step_algorithm(req: AlgorithmRequest):
         if algo == "MC":
             # MC (từ train_mc.py) dùng 3-tuple
             full_state = (state_xy[0], state_xy[1], visited_code)
-        elif algo == "SARSA":
-                # SARSA (từ code gốc) cũng dùng 3-tuple
-            full_state = (state_xy[0], state_xy[1], visited_code)
-        else:
-            # Q-Learning (từ code gốc) dùng 4-tuple
-            unvisited_wps = [wp for wp in env.waypoints if wp not in env.visited_waypoints]
-            if unvisited_wps:
-                dist_to_next = min([manhattan_distance(state_xy, wp) for wp in unvisited_wps])
-            else:
-                dist_to_next = manhattan_distance(state_xy, env.goal)
+
+            # --- SỬA LỖI: LOGIC THỰC THI GREEDY ---
+            # (Xóa bỏ logic training online/trajectory)
             
-            full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
-        done = False
+            action_name = None
+            
+            # 1. Ưu tiên policy đã học (từ mc_policy.pkl)
+            if full_state in mc_policy:
+                action_name = mc_policy[full_state]
+            
+            # 2. Nếu không, thử suy ra từ Q-table (từ mc_qtable.pkl)
+            elif full_state in mc_Q and any(mc_Q[full_state].values()):
+                try:
+                    action_name = max(mc_Q[full_state], key=lambda a: mc_Q[full_state].get(a, 0.0))
+                    mc_policy[full_state] = action_name # Lưu lại cho lần sau
+                except Exception:
+                    action_name = random.choice(actions) # Fallback nếu Q-value lỗi
+            
+            # 3. Fallback: Nếu state chưa từng thấy, dùng A* (giống /run_mc_greedy)
+            else:
+                target = select_next_target(env) # Tìm mục tiêu gần nhất
+                path_to_target = a_star(state_xy, target, env.obstacles, env.width, env.height)
+                if len(path_to_target) > 1:
+                    next_pos = path_to_target[1]
+                    dx, dy = next_pos[0] - state_xy[0], next_pos[1] - state_xy[1]
+                    try:
+                        action_idx_fb = env.ACTIONS.index((dx, dy))
+                        action_name = actions[action_idx_fb]
+                    except ValueError:
+                        action_name = random.choice(actions)
+                else:
+                    action_name = random.choice(actions)
+                
+                # Ghi nhớ hành động fallback này
+                mc_policy[full_state] = action_name
+
+            action_idx = actions.index(action_name)
+            
+            # 2. Thực hiện hành động đã chọn (Greedy)
+            next_state, r, done, _ = env.step(action_idx)
+
+            # 3. Ghi nhận kết quả (KHÔNG CẦN CẬP NHẬT ONLINE)
+            reward = r
+            state_xy = next_state # Cập nhật state_xy cho response
         
         if algo == "MC":
             # 1. Chọn hành động từ policy
