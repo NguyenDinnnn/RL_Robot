@@ -1,190 +1,333 @@
+"""
+MC-ES (Explicit Pseudocode Implementation)
+
+Phiên bản này tuân thủ CHÍNH XÁC theo từng chữ của mã giả lý thuyết,
+bao gồm cả việc duy trì một đối tượng Policy (pi) riêng biệt 
+và cập nhật nó một cách tường minh (explicitly) trong vòng lặp.
+"""
 import os
+import sys
+import random
+import itertools
 import pickle
 from collections import defaultdict
-import random
+from typing import List, Tuple, Set
 import numpy as np
-from typing import List, Tuple, Optional
-import heapq
-from itertools import permutations
-import sys, os
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 
+# ensure app package importable when running from clients/
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '..')))
 from app.robot_env import GridWorldEnv
 
-# Hàm tính khoảng cách Manhattan
-def manhattan_distance(pos1: Tuple[int, int], pos2: Tuple[int, int]) -> int:
-    return abs(pos1[0] - pos2[0]) + abs(pos1[1] - pos2[1])
+# ---------------------- Hyperparameters ----------------------
+GAMMA = 0.99
+NUM_EPISODES = 20000
+MAX_STEPS_PER_EPISODE = 500
 
-# Hàm A* để tìm đường đi ngắn nhất
-def a_star(start, goal, obstacles, width, height):
-    open_set = []
-    heapq.heappush(open_set, (0 + manhattan_distance(start, goal), 0, start, [start]))
-    visited = set()
-    while open_set:
-        f, g, current, path = heapq.heappop(open_set)
-        if current == goal:
-            return path
-        if current in visited:
-            continue
-        visited.add(current)
-        x, y = current
-        for dx, dy in [(0, -1), (1, 0), (0, 1), (-1, 0)]:
-            nx, ny = x + dx, y + dy
-            if 0 <= nx < width and 0 <= ny < height and (nx, ny) not in obstacles:
-                heapq.heappush(open_set, (g + 1 + manhattan_distance((nx, ny), goal), g + 1, (nx, ny), path + [(nx, ny)]))
-    return []
+# (Các hằng số khác như EVAL_INTERVAL, PRINT_INTERVAL, v.v. giữ nguyên)
+USE_POTENTIAL_SHAPING = True
+WP_WEIGHT = 1.5
+EVAL_INTERVAL = 500
+EVAL_EPISODES = 20
+PRINT_INTERVAL = 100
 
-def plan_path_through_waypoints(start, waypoints, goal, obstacles, width, height):
-    best_path = None
-    min_len = float('inf')
-    for order in permutations(waypoints):
-        path = []
-        curr = start
-        valid = True
-        for wp in order:
-            sub_path = a_star(curr, wp, obstacles, width, height)
-            if not sub_path:
-                valid = False
-                break
-            path += sub_path[:-1]
-            curr = wp
-        if not valid:
-            continue
-        sub_path = a_star(curr, goal, obstacles, width, height)
-        if not sub_path:
-            continue
-        path += sub_path
-        if len(path) < min_len:
-            min_len = len(path)
-            best_path = path
-    return best_path or []
+MODELS_DIR = os.path.join(os.path.dirname(__file__), "models")
+os.makedirs(MODELS_DIR, exist_ok=True)
+# Đặt tên file theo yêu cầu của bạn
+Q_FILE = os.path.join(MODELS_DIR, "mc_qtable.pkl")
+POLICY_FILE = os.path.join(MODELS_DIR, "mc_policy.pkl")
+RETURNS_FILE = os.path.join(MODELS_DIR, "mc_returns.pkl")
 
-# Hàm mã hóa trạng thái visited waypoints
-def encode_visited(wp_list, visited_set):
-    code = 0
-    for i, wp in enumerate(wp_list):
-        if wp in visited_set:
-            code |= (1 << i)
-    return code
-
-# Tham số huấn luyện
-alpha = 0.1  # Learning rate
-gamma = 0.99  # Discount factor
-epsilon = 1.0  # Epsilon khởi đầu
-epsilon_min = 0.01
-epsilon_decay = 0.995
-num_episodes = 20000  # Tăng để học tốt hơn
-max_steps_per_episode = 100  # Giảm để ép đường ngắn hơn
-
-# Danh sách hành động
-actions = ['up', 'right', 'down', 'left']
-
-# Khởi tạo Q-table
-mc_Q = defaultdict(lambda: {a: 0.0 for a in actions})
-
-# Map cố định để huấn luyện và đánh giá
+# ---------------------- Environment ----------------------
 width, height = 10, 8
 start = (0, 0)
 goal = (9, 7)
 obstacles = [(1,1), (2,3), (4,4), (5,1), (7,6)]
 waypoints = [(3,2), (6,5)]
 
-env = GridWorldEnv(width, height, start, goal, obstacles, waypoints, max_steps=max_steps_per_episode)
+env = GridWorldEnv(width=width, height=height, start=start, goal=goal,
+                 obstacles=obstacles, waypoints=waypoints, max_steps=MAX_STEPS_PER_EPISODE)
+env.step_penalty = -1.0
+env.revisit_penalty = -2.0
+env.waypoint_reward = 30.0
+env.goal_reward = 200.0
+env.goal_before_waypoints_penalty = -25.0
 
-# Điều chỉnh reward parameters để tối ưu số bước
-env.step_penalty = -2.0  # Tăng penalty mỗi bước
-env.revisit_penalty = -3.0  # Tăng phạt khi quay lại ô cũ
-env.waypoint_reward = 30.0  # Tăng thưởng waypoint
-env.goal_reward = 100.0  # Tăng thưởng goal
-env.goal_before_waypoints_penalty = -10.0  # Tăng phạt nếu đến goal trước
+ACTION_NAMES = GridWorldEnv.ACTION_NAMES[:]
 
-# Hướng dẫn ban đầu bằng A*
-optimal_path = plan_path_through_waypoints(start, waypoints, goal, obstacles, width, height)
-if optimal_path:
-    print(f"Đường đi tối ưu từ A*: {len(optimal_path)-1} bước")
-    visited_waypoints_cumulative = set()
-    for i in range(len(optimal_path)-1):
-        curr, next_pos = optimal_path[i], optimal_path[i+1]
-        dx, dy = next_pos[0] - curr[0], next_pos[1] - curr[1]
-        action_idx = env.ACTIONS.index((dx, dy))
-        action_name = actions[action_idx]
-        # Cập nhật visited_waypoints_cumulative nếu curr là waypoint
-        if curr in waypoints:
-            visited_waypoints_cumulative.add(curr)
-        visited_code = encode_visited(waypoints, visited_waypoints_cumulative)
-        dist_to_next = min([manhattan_distance(curr, wp) for wp in waypoints if wp not in visited_waypoints_cumulative] + 
-                           [manhattan_distance(curr, goal)] if len(visited_waypoints_cumulative) == len(waypoints) else [float('inf')])
-        state = (curr[0], curr[1], visited_code, dist_to_next)
-        mc_Q[state][action_name] = 10.0  # Khởi tạo Q-value cao cho đường đi tối ưu
+# ---------------------- Helpers ----------------------
+# (Toàn bộ các hàm helpers như encode_visited, all_subsets, 
+#  build_all_full_states, decode_visited_code, phi_potential, 
+#  evaluate_policy, render_policy_as_arrows, safe_load
 
-# Huấn luyện Monte Carlo on-policy (first-visit)
+def encode_visited(wp_list: List[Tuple[int,int]], visited_set: Set[Tuple[int,int]]) -> int:
+    code = 0
+    for i, wp in enumerate(wp_list):
+        if wp in visited_set:
+            code |= (1 << i)
+    return code
+def all_subsets(lst):
+    for r in range(len(lst)+1):
+        for comb in itertools.combinations(lst, r):
+            yield set(comb)
+def build_all_full_states(env: GridWorldEnv):
+    all_cells = [(x, y) for x in range(env.width) for y in range(env.height) if (x,y) not in env.obstacles]
+    full_states = []
+    for cell in all_cells:
+        for visited in all_subsets(env.waypoints):
+            if cell == env.goal and set(env.waypoints).issubset(visited):
+                continue
+            code = encode_visited(env.waypoints, visited)
+            full_states.append((cell[0], cell[1], code))
+    return full_states
+def decode_visited_code(code: int, wp_list: List[Tuple[int,int]]) -> Set[Tuple[int,int]]:
+    out = set()
+    for i, wp in enumerate(wp_list):
+        if (code >> i) & 1:
+            out.add(wp)
+    return out
+def phi_potential(state, goal_pos, waypoints, wp_weight=1.0):
+    x, y, visited_code = state
+    pos = (x, y)
+    dist = abs(pos[0] - goal_pos[0]) + abs(pos[1] - goal_pos[1])
+    visited_count = 0
+    for i in range(len(waypoints)):
+        if (visited_code >> i) & 1:
+            visited_count += 1
+    return -float(dist) - wp_weight * float(visited_count)
+def evaluate_policy(policy, n_episodes=20): # Đã sửa: Hàm eval giờ nhận policy
+    rewards = []
+    steps_list = []
+    for _ in range(n_episodes):
+        env.reset(start=start, goal=goal, obstacles=obstacles, waypoints=waypoints, max_steps=MAX_STEPS_PER_EPISODE)
+        env.state = start
+        env.visited_waypoints = set()
+        done = False
+        ep_reward = 0.0
+        ep_steps = 0
+        while not done and ep_steps < MAX_STEPS_PER_EPISODE:
+            s = env.get_state()
+            s_code = encode_visited(env.waypoints, env.visited_waypoints)
+            full = (s[0], s[1], s_code)
+            
+            # Đã sửa: Dùng policy được truyền vào
+            action = policy[full] 
+            
+            _, r, done, _ = env.step_by_name(action)
+            ep_reward += r
+            ep_steps += 1
+        rewards.append(ep_reward)
+        steps_list.append(ep_steps)
+    return float(np.mean(rewards)), float(np.mean(steps_list))
+def render_policy_as_arrows(policy): # Đã sửa: Hàm render giờ nhận policy
+    arrows = {"up":"↑", "right":"→", "down":"↓", "left":"←"}
+    out_lines = []
+    for y in range(env.height):
+        row = []
+        for x in range(env.width):
+            if (x,y) in env.obstacles:
+                row.append("#")
+                continue
+            key = (x, y, 0)
+            row.append(arrows.get(policy[key], "?")) # Dùng policy[key]
+        out_lines.append(" ".join(row))
+    return "\n".join(out_lines)
+def safe_load(path):
+    if os.path.exists(path):
+        try:
+            with open(path, 'rb') as f:
+                return pickle.load(f)
+        except Exception as e:
+            print("Warning load failed:", path, e)
+    return None
+# ---------------------- Prepare all states and SA pairs ----------------------
+all_full_states = build_all_full_states(env)
+if not all_full_states:
+    raise RuntimeError("No startable states (check env configuration)")
+
+all_sa_pairs = [(s, a) for s in all_full_states for a in ACTION_NAMES]
+
+# ==================================================================
+# MÃ GIẢ: Initialize: (BẮT ĐẦU PHẦN KHỞI TẠO)
+# ==================================================================
+
+# MÃ GIẢ DÒNG 1: pi(s) in A(s) (arbitrarily)
+# Khởi tạo policy (pi) một cách tường minh:
+# Gán cho mỗi trạng thái 's' một hành động 'a' ngẫu nhiên.
+mc_Policy = defaultdict(lambda: random.choice(ACTION_NAMES))
+print("Initialized explicit Policy (pi).")
+
+# MÃ GIẢ DÒNG 2: Q(s, a) in R (arbitrarily)
+# Khởi tạo Q-table, gán tất cả Q(s, a) = 0.0
+mc_Q = defaultdict(lambda: {a: 0.0 for a in ACTION_NAMES})
+print("Initialized Q-table.")
+
+# MÃ GIẢ DÒNG 3: Returns(s, a) <- empty list
+# Khởi tạo danh sách Returns, gán cho mỗi (s, a) một danh sách rỗng.
+mc_Returns = defaultdict(list)
+print("Initialized Returns lists.")
+
+# --- Tải file (nếu có) ---
+# Ghi đè các giá trị khởi tạo nếu file tồn tại
+loaded_Q = safe_load(Q_FILE)
+if loaded_Q:
+    for s, v in loaded_Q.items(): mc_Q[tuple(s)] = dict(v)
+    print("Loaded existing Q-table.")
+
+loaded_Returns = safe_load(RETURNS_FILE)
+if loaded_Returns:
+    for k, v in loaded_Returns.items(): mc_Returns[tuple(k)] = list(v)
+    print("Loaded existing Returns lists.")
+
+loaded_Policy = safe_load(POLICY_FILE)
+if loaded_Policy:
+    for k, v in loaded_Policy.items(): mc_Policy[tuple(k)] = v
+    print("Loaded existing Policy (pi).")
+
+# ==================================================================
+# MÃ GIẢ: Loop forever (for each episode):
+# ==================================================================
 total_rewards = []
-for episode in range(num_episodes):
-    env.reset(start=start, goal=goal, obstacles=obstacles, waypoints=waypoints)
+best_eval = -1e9
+
+for episode in range(1, NUM_EPISODES + 1):
+
+    # MÃ GIẢ DÒNG 4: Choose S0 in S, A0 in A(S0) randomly...
+    # (Exploring Starts)
+    s0, a0 = random.choice(all_sa_pairs)
+    visited0 = decode_visited_code(s0[2], env.waypoints)
     
-    # Exploring starts: bắt đầu từ vị trí ngẫu nhiên và visited ngẫu nhiên
-    all_cells = [(x, y) for x in range(width) for y in range(height) if (x, y) not in env.obstacles]
-    env.state = random.choice(all_cells)
-    num_visited = random.randint(0, len(waypoints))
-    env.visited_waypoints = set(random.sample(waypoints, num_visited))
+    # Reset env về S0
+    env.reset(start=start, goal=goal, obstacles=obstacles, waypoints=waypoints, max_steps=MAX_STEPS_PER_EPISODE)
+    env.state = (s0[0], s0[1])
+    env.visited_waypoints = set(visited0)
+    env.steps = 0
+
+    # MÃ GIẢ DÒNG 5: Generate an episode from S0, A0, following pi:
+    trajectory = []
     
-    trajectory = []  # List of (state, action, reward)
-    state_xy = env.get_state()
-    dist_to_next = min([manhattan_distance(state_xy, wp) for wp in waypoints if wp not in env.visited_waypoints] + 
-                       [manhattan_distance(state_xy, goal)] if len(env.visited_waypoints) == len(waypoints) else [float('inf')])
-    visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-    full_state = (state_xy[0], state_xy[1], visited_code, dist_to_next)
+    # 5a. Thực hiện hành động ép buộc A0
+    next_state, reward, done, info = env.step_by_name(a0)
     
-    done = False
-    episode_reward = 0
-    steps = 0
-    
-    while not done and steps < max_steps_per_episode:
-        if random.random() < epsilon:
-            action_name = random.choice(actions)
+    if USE_POTENTIAL_SHAPING:
+        phi_s = phi_potential(s0, goal, env.waypoints, WP_WEIGHT)
+        s1_code = encode_visited(env.waypoints, env.visited_waypoints)
+        s1 = (next_state[0], next_state[1], s1_code)
+        phi_s1 = phi_potential(s1, goal, env.waypoints, WP_WEIGHT)
+        shaped_reward = reward + (GAMMA * phi_s1 - phi_s)
+    else:
+        shaped_reward = reward
+        
+    trajectory.append((s0, a0, shaped_reward))
+    ep_reward = shaped_reward
+    steps = 1
+
+    # 5b. ... following pi (Đi theo policy 'mc_Policy' đã lưu)
+    cur_state_xy = env.get_state()
+    cur_code = encode_visited(env.waypoints, env.visited_waypoints)
+    cur_full = (cur_state_xy[0], cur_state_xy[1], cur_code)
+
+    while not done and steps < MAX_STEPS_PER_EPISODE:
+        
+        # LẤY HÀNH ĐỘNG TỪ POLICY (pi)
+        action = mc_Policy[cur_full]
+
+        # Thực hiện hành động và lưu trajectory
+        next_state, reward, done, info = env.step_by_name(action)
+        
+        if USE_POTENTIAL_SHAPING:
+            phi_s = phi_potential(cur_full, goal, env.waypoints, WP_WEIGHT)
+            snext_code = encode_visited(env.waypoints, env.visited_waypoints)
+            snext = (next_state[0], next_state[1], snext_code)
+            phi_snext = phi_potential(snext, goal, env.waypoints, WP_WEIGHT)
+            shaped_reward = reward + (GAMMA * phi_snext - phi_s)
         else:
-            if full_state in mc_Q:
-                action_name = max(mc_Q[full_state], key=mc_Q[full_state].get)
-            else:
-                action_name = random.choice(actions)
-        
-        action_idx = actions.index(action_name)
-        
-        next_state_xy, reward, done, _ = env.step(action_idx)
-        
-        trajectory.append((full_state, action_name, reward))
-        
-        dist_to_next = min([manhattan_distance(next_state_xy, wp) for wp in waypoints if wp not in env.visited_waypoints] + 
-                           [manhattan_distance(next_state_xy, goal)] if len(env.visited_waypoints) == len(waypoints) else [float('inf')])
-        visited_code = encode_visited(env.waypoints, env.visited_waypoints)
-        full_state = (next_state_xy[0], next_state_xy[1], visited_code, dist_to_next)
-        
-        episode_reward += reward
+            shaped_reward = reward
+
+        trajectory.append((cur_full, action, shaped_reward))
+        ep_reward += shaped_reward
         steps += 1
+        cur_state_xy = env.get_state()
+        cur_code = encode_visited(env.waypoints, env.visited_waypoints)
+        cur_full = (cur_state_xy[0], cur_state_xy[1], cur_code)
+
+    total_rewards.append(ep_reward)
+
+    # ==================================================================
+    # MÃ GIẢ: CẬP NHẬT (Vòng lặp backward)
+    # ==================================================================
+
+    # MÃ GIẢ DÒNG 6: G <- 0
+    G = 0.0
+    seen_sa = set()
     
-    # Cập nhật Q-value using first-visit MC
-    G = 0
-    visited_state_actions = set()
+    # MÃ GIẢ DÒNG 7: Loop for each step of episode, t = T-1, ... 0:
     for t in reversed(range(len(trajectory))):
-        state, action, r = trajectory[t]
-        G = r + gamma * G
-        state_action = (state, action)
-        if state_action not in visited_state_actions:
-            visited_state_actions.add(state_action)
-            old_q = mc_Q[state][action]
-            mc_Q[state][action] += alpha * (G - old_q)
-    
-    epsilon = max(epsilon_min, epsilon * epsilon_decay)
-    
-    total_rewards.append(episode_reward)
-    if (episode + 1) % 1000 == 0:
-        print(f"Episode {episode + 1}/{num_episodes} - Reward: {episode_reward:.2f} - Epsilon: {epsilon:.3f} - Steps: {steps}")
+        s, a, r = trajectory[t]
+        
+        # MÃ GIẢ DÒNG 8: G <- gamma*G + R_{t+1}
+        G = r + GAMMA * G
+        
+        sa = (s, a)
+        
+        # MÃ GIẢ DÒNG 9: Unless the pair St, At appears in S0...
+        # (Logic của First-Visit)
+        if sa not in seen_sa:
+            seen_sa.add(sa)
+            
+            # --- BẮT ĐẦU CẬP NHẬT ---
+            
+            # MÃ GIẢ DÒNG 10: Append G to Returns(St, At)
+            # Thêm G (return) vào danh sách của cặp (s, a) này
+            mc_Returns[sa].append(G) 
+            
+            # MÃ GIẢ DÒNG 11: Q(St, At) <- Average(Returns(St, At))
+            # Tính trung bình (Average) của TOÀN BỘ danh sách Returns
+            # Và cập nhật giá trị Q-value
+            mc_Q[s][a] = float(np.mean(mc_Returns[sa]))
+            
+            # MÃ GIẢ DÒNG 12: pi(St) <- argmax_a Q(St, a)
+            # Cập nhật policy (pi) một cách TƯỜNG MINH
+            # Tìm hành động 'a' tốt nhất (argmax) trong Q(s)
+            best_action = max(mc_Q[s], key=mc_Q[s].get)
+            mc_Policy[s] = best_action
+            
+            # --- KẾT THÚC CẬP NHẬT ---
 
-# Lưu Q-table
-models_dir = os.path.join(os.path.dirname(__file__), "models") if '__file__' in globals() else "./models"
-os.makedirs(models_dir, exist_ok=True)
-MC_QFILE = os.path.join(models_dir, "mc_qtable.pkl")
-with open(MC_QFILE, 'wb') as f:
-    pickle.dump(dict(mc_Q), f)
+    # ... (Phần 'Periodic prints' giữ nguyên) ...
+    if episode % PRINT_INTERVAL == 0:
+        avg_recent = float(np.mean(total_rewards[-PRINT_INTERVAL:])) if len(total_rewards) >= PRINT_INTERVAL else float(np.mean(total_rewards))
+        print(f"Episode {episode}/{NUM_EPISODES}  recent_avg={avg_recent:.2f}")
 
+<<<<<<< Updated upstream
 print(f"Huấn luyện hoàn tất. Q-table được lưu tại: {MC_QFILE}")
+=======
+    # ... (Phần 'Evaluation' và 'Save' giữ nguyên) ...
+    if episode % EVAL_INTERVAL == 0:
+        # Đã sửa: Truyền mc_Policy vào hàm đánh giá
+        mean_eval, mean_steps = evaluate_policy(mc_Policy, n_episodes=EVAL_EPISODES) 
+        print(f"== Eval at {episode}: mean_reward={mean_eval:.2f}, mean_steps={mean_steps:.1f} ==")
+        
+        if mean_eval > best_eval:
+            best_eval = mean_eval
+            # --- Lưu cả 3 file ---
+            with open(Q_FILE, 'wb') as f:
+                pickle.dump({tuple(k): v for k,v in mc_Q.items()}, f)
+            with open(RETURNS_FILE, 'wb') as f:
+                pickle.dump({tuple(k): v for k,v in mc_Returns.items()}, f)
+            with open(POLICY_FILE, 'wb') as f:
+                pickle.dump({tuple(k): v for k,v in mc_Policy.items()}, f)
+            print("Saved improved (EXPLICIT) Q/Returns/Policy.")
+
+# --- Lưu file lần cuối ---
+with open(Q_FILE, 'wb') as f:
+    pickle.dump({tuple(k): v for k,v in mc_Q.items()}, f)
+with open(RETURNS_FILE, 'wb') as f:
+    pickle.dump({tuple(k): v for k,v in mc_Returns.items()}, f)
+with open(POLICY_FILE, 'wb') as f:
+    pickle.dump({tuple(k): v for k,v in mc_Policy.items()}, f)
+print("MC-ES training finished (EXPLICIT version). Models saved.")
+
+# Đã sửa: Truyền mc_Policy vào hàm render
+print("\nPolicy (greedy) arrows for visited_code=0:")
+print(render_policy_as_arrows(mc_Policy))
+>>>>>>> Stashed changes
