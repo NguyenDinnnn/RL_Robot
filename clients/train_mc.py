@@ -27,7 +27,7 @@ GAMMA = 0.99
 # === SỬA LỖI 1: TĂNG EPISODES ===
 # MC-ES với sparse rewards yêu cầu RẤT NHIỀU khám phá.
 # 10,000 là quá thấp và sẽ học chính sách "đứng yên".
-NUM_EPISODES = 2000000 # 2 Triệu episodes
+NUM_EPISODES = 20000
 # ================================
 
 MAX_STEPS_PER_EPISODE = 500 # Giới hạn số bước mỗi tập
